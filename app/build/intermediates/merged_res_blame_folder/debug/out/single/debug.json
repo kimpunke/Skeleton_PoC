@@ -1,0 +1,10 @@
+[
+    {
+        "merged": "C:\\Users\\User\\.gradle\\daemon\\9.0-milestone-1\\com.example.mediapipepose.app-merged_res-36:\\layout_activity_main.xml.flat",
+        "source": "C:\\Users\\User\\.gradle\\daemon\\9.0-milestone-1\\com.example.mediapipepose.app-main-38:\\layout\\activity_main.xml"
+    },
+    {
+        "merged": "com.example.mediapipepose.app-merged_res-36:/layout_activity_main.xml.flat",
+        "source": "com.example.mediapipepose.app-main-38:/layout/activity_main.xml"
+    }
+]

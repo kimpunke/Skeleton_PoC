@@ -1,0 +1,11 @@
+R_DEF: Internal format may change without notice
+local
+color md_theme_primary
+id button_switch_camera
+id button_switch_mode
+id overlay_view
+id preview_view
+id text_mode
+layout activity_main
+string app_name
+style Theme.MediaPipePose
