@@ -14,18 +14,28 @@
         align-items: center;
         justify-content: center;
       }
-      video {
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
+      #grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        width: min(100vw, 1280px);
+        padding: 12px;
+        box-sizing: border-box;
       }
-      #offlineImage {
-        position: fixed;
+      .videoFrame {
+        position: relative;
+        aspect-ratio: 4 / 3;
+        background: #000;
+      }
+      .videoFrame video,
+      .videoFrame img {
+        position: absolute;
         inset: 0;
         width: 100%;
         height: 100%;
         object-fit: contain;
-        background: #000;
+      }
+      .offlineImage {
         display: none;
         z-index: 1;
       }
@@ -46,8 +56,24 @@
   </head>
   <body>
     <div id="viewerCount">Viewers: 0</div>
-    <img id="offlineImage" src="offline.png" alt="Offline" />
-    <video id="remoteVideo" autoplay playsinline muted></video>
+    <div id="grid">
+      <div class="videoFrame">
+        <img id="offlineImage1" class="offlineImage" src="offline.png" alt="Offline" />
+        <video id="remoteVideo1" autoplay playsinline muted></video>
+      </div>
+      <div class="videoFrame">
+        <img id="offlineImage2" class="offlineImage" src="offline.png" alt="Offline" />
+        <video id="remoteVideo2" autoplay playsinline muted></video>
+      </div>
+      <div class="videoFrame">
+        <img id="offlineImage3" class="offlineImage" src="offline.png" alt="Offline" />
+        <video id="remoteVideo3" autoplay playsinline muted></video>
+      </div>
+      <div class="videoFrame">
+        <img id="offlineImage4" class="offlineImage" src="offline.png" alt="Offline" />
+        <video id="remoteVideo4" autoplay playsinline muted></video>
+      </div>
+    </div>
     <script src="viewer.js"></script>
   </body>
 </html>

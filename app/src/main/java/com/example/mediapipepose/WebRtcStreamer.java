@@ -4,8 +4,6 @@ import android.content.Context;
 import android.util.Log;
 import androidx.annotation.Nullable;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
@@ -34,7 +32,7 @@ public class WebRtcStreamer {
 
     private final Context context;
     private PeerConnectionFactory peerConnectionFactory;
-    private final Map<String, PeerConnection> peerConnections = new HashMap<>();
+    private PeerConnection peerConnection;
     private VideoSource videoSource;
     private VideoTrack videoTrack;
     private EglBase eglBase;
@@ -55,6 +53,7 @@ public class WebRtcStreamer {
         }
         started = true;
         initializePeerConnectionFactory();
+        createPeerConnection();
         connectWebSocket(signalingUrl);
     }
 
@@ -65,10 +64,10 @@ public class WebRtcStreamer {
             webSocket = null;
         }
         detachRemoteRenderer();
-        for (PeerConnection connection : peerConnections.values()) {
-            connection.close();
+        if (peerConnection != null) {
+            peerConnection.close();
+            peerConnection = null;
         }
-        peerConnections.clear();
         if (videoSource != null) {
             videoSource.getCapturerObserver().onCapturerStopped();
             videoSource.dispose();
@@ -123,28 +122,19 @@ public class WebRtcStreamer {
         videoSource.getCapturerObserver().onCapturerStarted(true);
     }
 
-    private PeerConnection createPeerConnection(String viewerId) {
-        if (viewerId == null || viewerId.isEmpty()) {
-            return null;
-        }
-        PeerConnection existing = peerConnections.get(viewerId);
-        if (existing != null) {
-            return existing;
-        }
-
+    private void createPeerConnection() {
         PeerConnection.RTCConfiguration configuration = new PeerConnection.RTCConfiguration(
                 Collections.singletonList(
                         PeerConnection.IceServer.builder("stun:stun.l.google.com:19302")
                                 .createIceServer()));
         configuration.sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN;
-        PeerConnection connection = peerConnectionFactory.createPeerConnection(
+        peerConnection = peerConnectionFactory.createPeerConnection(
                 configuration,
-                new PeerConnectionObserver(viewerId));
-        if (connection == null) {
-            return null;
+                new PeerConnectionObserver());
+        if (peerConnection == null) {
+            return;
         }
-        peerConnections.put(viewerId, connection);
-        RtpTransceiver transceiver = connection.addTransceiver(
+        RtpTransceiver transceiver = peerConnection.addTransceiver(
                 videoTrack,
                 new RtpTransceiver.RtpTransceiverInit(
                         RtpTransceiver.RtpTransceiverDirection.SEND_ONLY,
@@ -158,7 +148,6 @@ public class WebRtcStreamer {
                 transceiver.getSender().setParameters(parameters);
             }
         }
-        return connection;
     }
 
     private void connectWebSocket(String url) {
@@ -174,21 +163,19 @@ public class WebRtcStreamer {
         webSocket.send(message.toString());
     }
 
-    private void createOffer(String viewerId) {
-        PeerConnection connection = createPeerConnection(viewerId);
-        if (connection == null) {
+    private void createOffer() {
+        if (peerConnection == null) {
             return;
         }
         MediaConstraints constraints = new MediaConstraints();
-        connection.createOffer(new SdpObserver() {
+        peerConnection.createOffer(new SdpObserver() {
             @Override
             public void onCreateSuccess(SessionDescription sessionDescription) {
-                connection.setLocalDescription(new SimpleSdpObserver(), sessionDescription);
+                peerConnection.setLocalDescription(new SimpleSdpObserver(), sessionDescription);
                 try {
                     JSONObject payload = new JSONObject();
                     payload.put("type", "offer");
                     payload.put("sdp", sessionDescription.description);
-                    payload.put("viewerId", viewerId);
                     sendMessage(payload);
                 } catch (JSONException exception) {
                     Log.e(TAG, "Failed to send offer", exception);
@@ -208,43 +195,25 @@ public class WebRtcStreamer {
         }, constraints);
     }
 
-    private void handleAnswer(String viewerId, String sdp) {
-        PeerConnection connection = peerConnections.get(viewerId);
-        if (connection == null) {
+    private void handleAnswer(String sdp) {
+        if (peerConnection == null) {
             return;
         }
         SessionDescription answer = new SessionDescription(SessionDescription.Type.ANSWER, sdp);
-        connection.setRemoteDescription(new SimpleSdpObserver(), answer);
+        peerConnection.setRemoteDescription(new SimpleSdpObserver(), answer);
     }
 
-    private void handleCandidate(String viewerId, JSONObject message) throws JSONException {
-        PeerConnection connection = peerConnections.get(viewerId);
-        if (connection == null) {
+    private void handleCandidate(JSONObject message) throws JSONException {
+        if (peerConnection == null) {
             return;
         }
         String sdpMid = message.getString("sdpMid");
         int sdpMLineIndex = message.getInt("sdpMLineIndex");
         String candidate = message.getString("candidate");
-        connection.addIceCandidate(new IceCandidate(sdpMid, sdpMLineIndex, candidate));
-    }
-
-    private void closePeerConnection(String viewerId) {
-        if (viewerId == null || viewerId.isEmpty()) {
-            return;
-        }
-        PeerConnection connection = peerConnections.remove(viewerId);
-        if (connection != null) {
-            connection.close();
-        }
+        peerConnection.addIceCandidate(new IceCandidate(sdpMid, sdpMLineIndex, candidate));
     }
 
     private class PeerConnectionObserver implements PeerConnection.Observer {
-        private final String viewerId;
-
-        private PeerConnectionObserver(String viewerId) {
-            this.viewerId = viewerId;
-        }
-
         @Override
         public void onIceCandidate(IceCandidate candidate) {
             try {
@@ -253,7 +222,6 @@ public class WebRtcStreamer {
                 payload.put("sdpMid", candidate.sdpMid);
                 payload.put("sdpMLineIndex", candidate.sdpMLineIndex);
                 payload.put("candidate", candidate.sdp);
-                payload.put("viewerId", viewerId);
                 sendMessage(payload);
             } catch (JSONException exception) {
                 Log.e(TAG, "Failed to send ICE", exception);
@@ -325,6 +293,7 @@ public class WebRtcStreamer {
     private class SignalingWebSocketListener extends WebSocketListener {
         @Override
         public void onOpen(WebSocket webSocket, Response response) {
+            createOffer();
         }
 
         @Override
@@ -332,17 +301,12 @@ public class WebRtcStreamer {
             try {
                 JSONObject message = new JSONObject(text);
                 String type = message.optString("type", "");
-                String viewerId = message.optString("viewerId", "");
                 if ("ready".equals(type)) {
-                    if (!viewerId.isEmpty()) {
-                        createOffer(viewerId);
-                    }
+                    createOffer();
                 } else if ("answer".equals(type)) {
-                    handleAnswer(viewerId, message.getString("sdp"));
+                    handleAnswer(message.getString("sdp"));
                 } else if ("candidate".equals(type)) {
-                    handleCandidate(viewerId, message);
-                } else if ("viewer-disconnected".equals(type)) {
-                    closePeerConnection(viewerId);
+                    handleCandidate(message);
                 }
             } catch (JSONException exception) {
                 Log.e(TAG, "Invalid signaling message", exception);
