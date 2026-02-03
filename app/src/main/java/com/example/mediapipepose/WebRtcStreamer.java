@@ -124,7 +124,7 @@ public class WebRtcStreamer {
     }
 
     private PeerConnection createPeerConnection(String viewerId) {
-        if (viewerId == null || viewerId.isEmpty()) { 
+        if (viewerId == null || viewerId.isEmpty()) {
             return null;
         }
         PeerConnection existing = peerConnections.get(viewerId);

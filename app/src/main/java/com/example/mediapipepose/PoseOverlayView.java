@@ -11,6 +11,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult;
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 public class PoseOverlayView extends View {
     private static final float POSE_LANDMARK_RADIUS = 6f;
@@ -348,8 +349,19 @@ public class PoseOverlayView extends View {
     }
 
     private boolean isLandmarkConfident(NormalizedLandmark landmark) {
-        float visibility = landmark.visibility();
-        float presence = landmark.presence();
+        if (renderMode != RenderMode.POSE) {
+            return true;
+        }
+        float visibility = 0f;
+        float presence = 0f;
+        Optional<Float> visibilityOpt = landmark.visibility();
+        Optional<Float> presenceOpt = landmark.presence();
+        if (visibilityOpt != null && visibilityOpt.isPresent()) {
+            visibility = visibilityOpt.get();
+        }
+        if (presenceOpt != null && presenceOpt.isPresent()) {
+            presence = presenceOpt.get();
+        }
         float confidence = Math.max(visibility, presence);
         return confidence >= MIN_LANDMARK_CONFIDENCE;
     }
