@@ -3432,6 +3432,7 @@ int id progress_horizontal 0x7f080169
 int id radio 0x7f08016a
 int id ratio 0x7f08016b
 int id rectangles 0x7f08016c
+int id remote_view 0x7f0801f9
 int id report_drawn 0x7f08016d
 int id reverseSawtooth 0x7f08016e
 int id right 0x7f08016f
@@ -3526,6 +3527,7 @@ int id text_input_end_icon 0x7f0801c7
 int id text_input_error_icon 0x7f0801c8
 int id text_input_start_icon 0x7f0801c9
 int id text_mode 0x7f0801ca
+int id text_pose_class 0x7f0801f8
 int id textinput_counter 0x7f0801cb
 int id textinput_error 0x7f0801cc
 int id textinput_helper_text 0x7f0801cd
@@ -3850,6 +3852,10 @@ int string material_timepicker_minute 0x7f0e0052
 int string material_timepicker_pm 0x7f0e0053
 int string material_timepicker_select_time 0x7f0e0054
 int string material_timepicker_text_input_mode_description 0x7f0e0055
+int string mode_face 0x7f0e00a1
+int string mode_hand 0x7f0e00a2
+int string mode_pose 0x7f0e00a3
+int string mode_pose_hand 0x7f0e00a4
 int string mtrl_badge_numberless_content_description 0x7f0e0056
 int string mtrl_checkbox_button_icon_path_checked 0x7f0e0057
 int string mtrl_checkbox_button_icon_path_group_name 0x7f0e0058
@@ -3917,13 +3923,19 @@ int string path_password_eye 0x7f0e0095
 int string path_password_eye_mask_strike_through 0x7f0e0096
 int string path_password_eye_mask_visible 0x7f0e0097
 int string path_password_strike_through 0x7f0e0098
+int string pose_lying 0x7f0e00a5
+int string pose_sitting 0x7f0e00a6
+int string pose_standing 0x7f0e00a7
+int string pose_unknown 0x7f0e00a8
 int string search_menu_title 0x7f0e0099
 int string searchbar_scrolling_view_behavior 0x7f0e009a
 int string searchview_clear_text_content_description 0x7f0e009b
 int string searchview_navigation_content_description 0x7f0e009c
 int string side_sheet_accessibility_pane_title 0x7f0e009d
 int string side_sheet_behavior 0x7f0e009e
+int string signaling_url 0x7f0e00a0
 int string status_bar_notification_info_overflow 0x7f0e009f
+int string text_empty 0x7f0e00a9
 int style AlertDialog_AppCompat 0x7f0f0000
 int style AlertDialog_AppCompat_Light 0x7f0f0001
 int style Animation_AppCompat_Dialog 0x7f0f0002

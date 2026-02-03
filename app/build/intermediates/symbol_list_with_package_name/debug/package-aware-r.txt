@@ -3433,6 +3433,7 @@ id progress_horizontal
 id radio
 id ratio
 id rectangles
+id remote_view
 id report_drawn
 id reverseSawtooth
 id right
@@ -3527,6 +3528,7 @@ id text_input_end_icon
 id text_input_error_icon
 id text_input_start_icon
 id text_mode
+id text_pose_class
 id textinput_counter
 id textinput_error
 id textinput_helper_text
@@ -3851,6 +3853,10 @@ string material_timepicker_minute
 string material_timepicker_pm
 string material_timepicker_select_time
 string material_timepicker_text_input_mode_description
+string mode_face
+string mode_hand
+string mode_pose
+string mode_pose_hand
 string mtrl_badge_numberless_content_description
 string mtrl_checkbox_button_icon_path_checked
 string mtrl_checkbox_button_icon_path_group_name
@@ -3918,13 +3924,19 @@ string path_password_eye
 string path_password_eye_mask_strike_through
 string path_password_eye_mask_visible
 string path_password_strike_through
+string pose_lying
+string pose_sitting
+string pose_standing
+string pose_unknown
 string search_menu_title
 string searchbar_scrolling_view_behavior
 string searchview_clear_text_content_description
 string searchview_navigation_content_description
 string side_sheet_accessibility_pane_title
 string side_sheet_behavior
+string signaling_url
 string status_bar_notification_info_overflow
+string text_empty
 style AlertDialog_AppCompat
 style AlertDialog_AppCompat_Light
 style Animation_AppCompat_Dialog

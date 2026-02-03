@@ -2,6 +2,16 @@
 <resources>
     <color name="md_theme_primary">#1E88E5</color>
     <string name="app_name">MediaPipe Pose</string>
+    <string name="mode_face">Face</string>
+    <string name="mode_hand">Hand</string>
+    <string name="mode_pose">Pose</string>
+    <string name="mode_pose_hand">Pose+Hand</string>
+    <string name="pose_lying">Lying</string>
+    <string name="pose_sitting">Sitting</string>
+    <string name="pose_standing">Standing</string>
+    <string name="pose_unknown">Unknown</string>
+    <string name="signaling_url">ws://44.220.180.75:3000/ws?sender</string>
+    <string name="text_empty"/>
     <style name="Theme.MediaPipePose" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <item name="colorPrimary">@color/md_theme_primary</item>
         <item name="colorPrimaryVariant">@color/md_theme_primary</item>
