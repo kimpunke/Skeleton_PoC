@@ -82,6 +82,7 @@ public class MainActivity extends AppCompatActivity {
     private long lastPoseLogTimestampMs = 0;
     private long lastClassificationTimestampMs = 0;
     private long lastPoseSendTimestampMs = 0;
+    private String signalingUrl;
     private long lastAnkleTimestampMs = 0;
     private float lastLeftAnkleX = Float.NaN;
     private float lastLeftAnkleY = Float.NaN;
@@ -109,7 +110,7 @@ public class MainActivity extends AppCompatActivity {
         cameraExecutor = Executors.newSingleThreadExecutor();
 
         setupPoseLandmarker();
-        String signalingUrl = getString(R.string.signaling_url);
+        signalingUrl = getString(R.string.signaling_url);
         webRtcStreamer = new WebRtcStreamer(this);
         webRtcStreamer.setRemoteRenderer(remoteView);
         webRtcStreamer.setPoseLabelListener(this::handleServerPoseLabel);
@@ -541,6 +542,29 @@ public class MainActivity extends AppCompatActivity {
         }
         if (eglBase != null) {
             eglBase.release();
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (webRtcStreamer != null && signalingUrl != null) {
+            webRtcStreamer.start(signalingUrl);
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                == PackageManager.PERMISSION_GRANTED) {
+            startCamera();
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (cameraProvider != null) {
+            cameraProvider.unbindAll();
+        }
+        if (webRtcStreamer != null) {
+            webRtcStreamer.stop();
         }
     }
 
