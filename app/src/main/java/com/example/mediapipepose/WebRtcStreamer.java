@@ -3,12 +3,16 @@ package com.example.mediapipepose;
 import android.content.Context;
 import android.util.Log;
 import androidx.annotation.Nullable;
+import com.google.mediapipe.tasks.components.containers.NormalizedLandmark;
 import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import org.webrtc.IceCandidate;
@@ -30,6 +34,10 @@ import org.webrtc.VideoTrack;
 public class WebRtcStreamer {
     private static final String TAG = "WebRtcStreamer";
 
+    public interface PoseLabelListener {
+        void onPoseLabel(String label);
+    }
+
     private final Context context;
     private PeerConnectionFactory peerConnectionFactory;
     private PeerConnection peerConnection;
@@ -42,6 +50,8 @@ public class WebRtcStreamer {
     private SurfaceViewRenderer remoteRenderer;
     private WebSocket webSocket;
     private boolean started;
+    @Nullable
+    private PoseLabelListener poseLabelListener;
 
     public WebRtcStreamer(Context context) {
         this.context = context.getApplicationContext();
@@ -90,11 +100,49 @@ public class WebRtcStreamer {
         }
     }
 
+    public void setPoseLabelListener(@Nullable PoseLabelListener listener) {
+        poseLabelListener = listener;
+    }
+
     public void sendFrame(VideoFrame frame) {
         if (!started || videoSource == null) {
             return;
         }
         videoSource.getCapturerObserver().onFrameCaptured(frame);
+    }
+
+    public void sendPoseLandmarks(List<NormalizedLandmark> landmarks) {
+        if (!started || webSocket == null || landmarks == null || landmarks.isEmpty()) {
+            return;
+        }
+        try {
+            JSONArray landmarkArray = new JSONArray();
+            for (NormalizedLandmark landmark : landmarks) {
+                JSONArray entry = new JSONArray();
+                entry.put(landmark.x());
+                entry.put(landmark.y());
+                entry.put(landmark.z());
+                float visibility = 0f;
+                float presence = 0f;
+                Optional<Float> visibilityOpt = landmark.visibility();
+                Optional<Float> presenceOpt = landmark.presence();
+                if (visibilityOpt != null && visibilityOpt.isPresent()) {
+                    visibility = visibilityOpt.get();
+                }
+                if (presenceOpt != null && presenceOpt.isPresent()) {
+                    presence = presenceOpt.get();
+                }
+                entry.put(visibility);
+                entry.put(presence);
+                landmarkArray.put(entry);
+            }
+            JSONObject payload = new JSONObject();
+            payload.put("type", "pose");
+            payload.put("landmarks", landmarkArray);
+            sendMessage(payload);
+        } catch (JSONException exception) {
+            Log.e(TAG, "Failed to send pose landmarks", exception);
+        }
     }
 
     private void initializePeerConnectionFactory() {
@@ -307,6 +355,12 @@ public class WebRtcStreamer {
                     handleAnswer(message.getString("sdp"));
                 } else if ("candidate".equals(type)) {
                     handleCandidate(message);
+                } else if ("pose-label".equals(type)) {
+                    String label = message.optString("label", "");
+                    PoseLabelListener listener = poseLabelListener;
+                    if (listener != null) {
+                        listener.onPoseLabel(label);
+                    }
                 }
             } catch (JSONException exception) {
                 Log.e(TAG, "Invalid signaling message", exception);

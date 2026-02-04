@@ -14,10 +14,12 @@ string mode_face
 string mode_hand
 string mode_pose
 string mode_pose_hand
+string pose_crouching
 string pose_lying
 string pose_sitting
 string pose_standing
 string pose_unknown
+string pose_walking
 string signaling_url
 string text_empty
 style Theme.MediaPipePose

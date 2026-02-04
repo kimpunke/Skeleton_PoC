@@ -4,8 +4,11 @@ const wsPort = location.port || "3000";
 const wsUrl = `${wsProtocol}://${location.hostname}:${wsPort}/ws?viewer`;
 const ws = new WebSocket(wsUrl);
 const viewerCountEl = document.getElementById("viewerCount");
+const gridEl = document.getElementById("grid");
+const backButton = document.getElementById("backButton");
 const slots = new Map();
 const peerConnections = new Map();
+let focusedSenderId = null;
 
 const showOffline = (senderId) => {
   const slot = slots.get(senderId);
@@ -85,8 +88,52 @@ for (let i = 1; i <= MAX_SENDERS; i += 1) {
   const senderId = String(i);
   const video = document.getElementById(`remoteVideo${i}`);
   const offline = document.getElementById(`offlineImage${i}`);
-  slots.set(senderId, { video, offline });
+  const label = document.getElementById(`poseLabel${i}`);
+  const frame = video ? video.closest(".videoFrame") : null;
+  slots.set(senderId, { video, offline, frame, label });
   showOffline(senderId);
+}
+
+const clearFocus = () => {
+  if (!gridEl) {
+    return;
+  }
+  focusedSenderId = null;
+  gridEl.classList.remove("focused");
+  for (const slot of slots.values()) {
+    if (slot.frame) {
+      slot.frame.classList.remove("focused");
+    }
+  }
+  if (backButton) {
+    backButton.classList.remove("visible");
+  }
+};
+
+const focusSender = (senderId) => {
+  if (!gridEl) {
+    return;
+  }
+  const slot = slots.get(senderId);
+  if (!slot || !slot.frame) {
+    return;
+  }
+  focusedSenderId = senderId;
+  gridEl.classList.add("focused");
+  for (const [id, entry] of slots.entries()) {
+    if (entry.frame) {
+      entry.frame.classList.toggle("focused", id === senderId);
+    }
+  }
+  if (backButton) {
+    backButton.classList.add("visible");
+  }
+};
+
+if (backButton) {
+  backButton.addEventListener("click", () => {
+    clearFocus();
+  });
 }
 
 ws.onmessage = async (event) => {
@@ -97,6 +144,16 @@ ws.onmessage = async (event) => {
   if (message.type === "viewer-count") {
     if (viewerCountEl) {
       viewerCountEl.textContent = `Viewers: ${message.count}`;
+    }
+    return;
+  }
+  if (message.type === "pose-label") {
+    const senderId = message.senderId;
+    const slot = slots.get(senderId);
+    if (slot && slot.label) {
+      const text = message.label || "";
+      slot.label.textContent = text;
+      slot.label.style.display = text ? "block" : "none";
     }
     return;
   }
@@ -137,8 +194,28 @@ ws.onmessage = async (event) => {
     }
     showOffline(senderId);
     clearStream(senderId);
+    const slot = slots.get(senderId);
+    if (slot && slot.label) {
+      slot.label.textContent = "";
+      slot.label.style.display = "none";
+    }
+    if (focusedSenderId === senderId) {
+      clearFocus();
+    }
   }
 };
+
+for (const [senderId, slot] of slots.entries()) {
+  if (!slot.frame) {
+    continue;
+  }
+  slot.frame.addEventListener("click", () => {
+    if (focusedSenderId === senderId) {
+      return;
+    }
+    focusSender(senderId);
+  });
+}
 
 ws.onclose = () => {
   showOfflineAll();

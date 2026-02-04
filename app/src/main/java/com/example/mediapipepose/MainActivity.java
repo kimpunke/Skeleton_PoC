@@ -47,6 +47,15 @@ public class MainActivity extends AppCompatActivity {
     private static final String FACE_MODEL_ASSET_PATH = "face_landmarker.task";
     private static final String HAND_MODEL_ASSET_PATH = "hand_landmarker.task";
     private static final long CLASSIFY_INTERVAL_MS = 200;
+    private static final float CROUCH_KNEE_ANGLE_THRESHOLD = 95f;
+    private static final float CROUCH_KNEE_ANGLE_SOFT = 108f;
+    private static final float SIT_KNEE_ANGLE_THRESHOLD = 140f;
+    private static final float CROUCH_HIP_OFFSET = 0.03f;
+    private static final float CROUCH_HIP_KNEE_SOFT = 0.05f;
+    private static final float CROUCH_HIP_HEEL_THRESHOLD = 0.18f;
+    private static final float CROUCH_MIN_CONFIDENCE = 0.6f;
+    private static final float CROUCH_HIP_HEEL_X_THRESHOLD = 0.08f;
+    private static final float WALKING_SPEED_THRESHOLD = 0.08f;
     private static final String TAG = "PoseTracking";
 
     private enum RenderMode {
@@ -72,6 +81,12 @@ public class MainActivity extends AppCompatActivity {
     private RenderMode currentMode = RenderMode.POSE;
     private long lastPoseLogTimestampMs = 0;
     private long lastClassificationTimestampMs = 0;
+    private long lastPoseSendTimestampMs = 0;
+    private long lastAnkleTimestampMs = 0;
+    private float lastLeftAnkleX = Float.NaN;
+    private float lastLeftAnkleY = Float.NaN;
+    private float lastRightAnkleX = Float.NaN;
+    private float lastRightAnkleY = Float.NaN;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -97,6 +112,7 @@ public class MainActivity extends AppCompatActivity {
         String signalingUrl = getString(R.string.signaling_url);
         webRtcStreamer = new WebRtcStreamer(this);
         webRtcStreamer.setRemoteRenderer(remoteView);
+        webRtcStreamer.setPoseLabelListener(this::handleServerPoseLabel);
         webRtcStreamer.start(signalingUrl);
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -261,7 +277,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         overlayView.setPoseResults(result, inputImage.getWidth(), inputImage.getHeight());
-        updatePoseClassification(result);
+        sendPoseLandmarks(result);
         long now = System.currentTimeMillis();
         if (now - lastPoseLogTimestampMs < 1000) {
             return;
@@ -335,8 +351,40 @@ public class MainActivity extends AppCompatActivity {
         runOnUiThread(() -> poseClassText.setText(label));
     }
 
+    private void handleServerPoseLabel(String label) {
+        if (poseClassText == null) {
+            return;
+        }
+        runOnUiThread(() -> {
+            if (currentMode != RenderMode.POSE && currentMode != RenderMode.POSE_HAND) {
+                clearPoseClassText();
+                overlayView.setPoseLabel("");
+                return;
+            }
+            if (label == null || label.isEmpty() || label.equals(getString(R.string.pose_unknown))) {
+                clearPoseClassText();
+                overlayView.setPoseLabel("");
+                return;
+            }
+            poseClassText.setText(label);
+            overlayView.setPoseLabel(label);
+        });
+    }
+
+    private void sendPoseLandmarks(PoseLandmarkerResult result) {
+        if (webRtcStreamer == null || result == null || result.landmarks().isEmpty()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastPoseSendTimestampMs < CLASSIFY_INTERVAL_MS) {
+            return;
+        }
+        lastPoseSendTimestampMs = now;
+        webRtcStreamer.sendPoseLandmarks(result.landmarks().get(0));
+    }
+
     private String classifyPose(List<NormalizedLandmark> landmarks) {
-        if (landmarks == null || landmarks.size() <= 28) {
+        if (landmarks == null || landmarks.size() <= 30) {
             return getString(R.string.pose_unknown);
         }
         NormalizedLandmark leftShoulder = landmarks.get(11);
@@ -347,11 +395,16 @@ public class MainActivity extends AppCompatActivity {
         NormalizedLandmark rightKnee = landmarks.get(26);
         NormalizedLandmark leftAnkle = landmarks.get(27);
         NormalizedLandmark rightAnkle = landmarks.get(28);
+        NormalizedLandmark leftHeel = landmarks.get(29);
+        NormalizedLandmark rightHeel = landmarks.get(30);
 
         float shoulderX = (leftShoulder.x() + rightShoulder.x()) * 0.5f;
         float shoulderY = (leftShoulder.y() + rightShoulder.y()) * 0.5f;
         float hipX = (leftHip.x() + rightHip.x()) * 0.5f;
         float hipY = (leftHip.y() + rightHip.y()) * 0.5f;
+        float kneeY = (leftKnee.y() + rightKnee.y()) * 0.5f;
+        float heelX = (leftHeel.x() + rightHeel.x()) * 0.5f;
+        float heelY = (leftHeel.y() + rightHeel.y()) * 0.5f;
 
         float torsoDx = Math.abs(shoulderX - hipX);
         float torsoDy = Math.abs(shoulderY - hipY);
@@ -362,10 +415,88 @@ public class MainActivity extends AppCompatActivity {
         float leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle);
         float rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle);
         float kneeAngle = (leftKneeAngle + rightKneeAngle) * 0.5f;
-        if (kneeAngle < 140f) {
+        float hipKneeDelta = Math.abs(hipY - kneeY);
+        float hipToHeel = Math.abs(heelY - hipY);
+        float hipHeelDeltaX = Math.abs(hipX - heelX);
+        boolean crouchReliable = isConfident(leftHip, CROUCH_MIN_CONFIDENCE)
+                && isConfident(rightHip, CROUCH_MIN_CONFIDENCE)
+                && isConfident(leftKnee, CROUCH_MIN_CONFIDENCE)
+                && isConfident(rightKnee, CROUCH_MIN_CONFIDENCE)
+                && isConfident(leftHeel, CROUCH_MIN_CONFIDENCE)
+                && isConfident(rightHeel, CROUCH_MIN_CONFIDENCE);
+        boolean tightCrouch = crouchReliable
+                && kneeAngle < CROUCH_KNEE_ANGLE_THRESHOLD
+                && hipKneeDelta < CROUCH_HIP_OFFSET
+                && hipHeelDeltaX < CROUCH_HIP_HEEL_X_THRESHOLD;
+        boolean lowHipCrouch = crouchReliable
+                && kneeAngle < CROUCH_KNEE_ANGLE_SOFT
+                && hipToHeel < CROUCH_HIP_HEEL_THRESHOLD
+                && hipKneeDelta < CROUCH_HIP_KNEE_SOFT
+                && hipHeelDeltaX < CROUCH_HIP_HEEL_X_THRESHOLD;
+        if (tightCrouch || lowHipCrouch) {
+            return getString(R.string.pose_crouching);
+        }
+        if (kneeAngle < SIT_KNEE_ANGLE_THRESHOLD) {
             return getString(R.string.pose_sitting);
         }
+        if (isWalking(landmarks, kneeAngle)) {
+            return getString(R.string.pose_walking);
+        }
         return getString(R.string.pose_standing);
+    }
+
+    private boolean isWalking(List<NormalizedLandmark> landmarks, float kneeAngle) {
+        if (landmarks.size() <= 28 || kneeAngle < 150f) {
+            return false;
+        }
+        NormalizedLandmark leftAnkle = landmarks.get(27);
+        NormalizedLandmark rightAnkle = landmarks.get(28);
+        long now = System.currentTimeMillis();
+        if (lastAnkleTimestampMs == 0) {
+            lastAnkleTimestampMs = now;
+            lastLeftAnkleX = leftAnkle.x();
+            lastLeftAnkleY = leftAnkle.y();
+            lastRightAnkleX = rightAnkle.x();
+            lastRightAnkleY = rightAnkle.y();
+            return false;
+        }
+        long deltaMs = now - lastAnkleTimestampMs;
+        if (deltaMs <= 0) {
+            return false;
+        }
+        float leftMove = distance(leftAnkle.x(), leftAnkle.y(), lastLeftAnkleX, lastLeftAnkleY);
+        float rightMove = distance(rightAnkle.x(), rightAnkle.y(), lastRightAnkleX, lastRightAnkleY);
+        float avgMove = (leftMove + rightMove) * 0.5f;
+        float speed = avgMove / (deltaMs / 1000f);
+        lastAnkleTimestampMs = now;
+        lastLeftAnkleX = leftAnkle.x();
+        lastLeftAnkleY = leftAnkle.y();
+        lastRightAnkleX = rightAnkle.x();
+        lastRightAnkleY = rightAnkle.y();
+        return speed > WALKING_SPEED_THRESHOLD;
+    }
+
+    private float distance(float x1, float y1, float x2, float y2) {
+        float dx = x1 - x2;
+        float dy = y1 - y2;
+        return (float) Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private boolean isConfident(NormalizedLandmark landmark, float threshold) {
+        if (landmark == null) {
+            return false;
+        }
+        float visibility = 0f;
+        float presence = 0f;
+        java.util.Optional<Float> visibilityOpt = landmark.visibility();
+        java.util.Optional<Float> presenceOpt = landmark.presence();
+        if (visibilityOpt != null && visibilityOpt.isPresent()) {
+            visibility = visibilityOpt.get();
+        }
+        if (presenceOpt != null && presenceOpt.isPresent()) {
+            presence = presenceOpt.get();
+        }
+        return Math.max(visibility, presence) >= threshold;
     }
 
     private float calculateAngle(

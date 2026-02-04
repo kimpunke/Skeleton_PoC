@@ -138,12 +138,6 @@ public class PoseOverlayView extends View {
         postInvalidate();
     }
 
-    public void drawOverlay(Canvas canvas, int outputWidth, int outputHeight) {
-        synchronized (renderLock) {
-            drawToCanvas(canvas, outputWidth, outputHeight, mirror);
-        }
-    }
-
     public void drawOverlay(Canvas canvas, int outputWidth, int outputHeight, boolean mirrorOverride) {
         synchronized (renderLock) {
             drawToCanvas(canvas, outputWidth, outputHeight, mirrorOverride);
@@ -151,7 +145,7 @@ public class PoseOverlayView extends View {
     }
 
     @Override
-    protected void onDraw(Canvas canvas) {
+    protected void onDraw(@androidx.annotation.NonNull Canvas canvas) {
         super.onDraw(canvas);
         synchronized (renderLock) {
             drawToCanvas(canvas, getWidth(), getHeight(), mirror);
@@ -200,16 +194,16 @@ public class PoseOverlayView extends View {
 
         List<float[]> points = new ArrayList<>(landmarks.size());
         for (NormalizedLandmark landmark : landmarks) {
-            if (!isLandmarkConfident(landmark)) {
+            if (isLandmarkConfident(landmark)) {
+                float x = landmark.x() * imageWidth * scale + offsetX;
+                float y = landmark.y() * imageHeight * scale + offsetY;
+                if (mirrorOverride) {
+                    x = canvasWidth - x;
+                }
+                points.add(new float[]{x, y});
+            } else {
                 points.add(null);
-                continue;
             }
-            float x = landmark.x() * imageWidth * scale + offsetX;
-            float y = landmark.y() * imageHeight * scale + offsetY;
-            if (mirrorOverride) {
-                x = canvasWidth - x;
-            }
-            points.add(new float[]{x, y});
         }
 
         for (int[] connection : POSE_CONNECTIONS) {
@@ -283,15 +277,14 @@ public class PoseOverlayView extends View {
 
         for (List<NormalizedLandmark> landmarks : faceResult.faceLandmarks()) {
             for (NormalizedLandmark landmark : landmarks) {
-                if (!isLandmarkConfident(landmark)) {
-                    continue;
+                if (isLandmarkConfident(landmark)) {
+                    float x = landmark.x() * imageWidth * scale + offsetX;
+                    float y = landmark.y() * imageHeight * scale + offsetY;
+                    if (mirrorOverride) {
+                        x = canvasWidth - x;
+                    }
+                    canvas.drawCircle(x, y, FACE_LANDMARK_RADIUS, pointPaint);
                 }
-                float x = landmark.x() * imageWidth * scale + offsetX;
-                float y = landmark.y() * imageHeight * scale + offsetY;
-                if (mirrorOverride) {
-                    x = canvasWidth - x;
-                }
-                canvas.drawCircle(x, y, FACE_LANDMARK_RADIUS, pointPaint);
             }
         }
     }
@@ -318,16 +311,16 @@ public class PoseOverlayView extends View {
         for (List<NormalizedLandmark> landmarks : handResult.landmarks()) {
             List<float[]> points = new ArrayList<>(landmarks.size());
             for (NormalizedLandmark landmark : landmarks) {
-                if (!isLandmarkConfident(landmark)) {
+                if (isLandmarkConfident(landmark)) {
+                    float x = landmark.x() * imageWidth * scale + offsetX;
+                    float y = landmark.y() * imageHeight * scale + offsetY;
+                    if (mirrorOverride) {
+                        x = canvasWidth - x;
+                    }
+                    points.add(new float[]{x, y});
+                } else {
                     points.add(null);
-                    continue;
                 }
-                float x = landmark.x() * imageWidth * scale + offsetX;
-                float y = landmark.y() * imageHeight * scale + offsetY;
-                if (mirrorOverride) {
-                    x = canvasWidth - x;
-                }
-                points.add(new float[]{x, y});
             }
 
             for (int[] connection : handConnections) {

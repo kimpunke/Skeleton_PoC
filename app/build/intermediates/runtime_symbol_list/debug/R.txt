@@ -3923,10 +3923,12 @@ int string path_password_eye 0x7f0e0095
 int string path_password_eye_mask_strike_through 0x7f0e0096
 int string path_password_eye_mask_visible 0x7f0e0097
 int string path_password_strike_through 0x7f0e0098
+int string pose_crouching 0x7f0e00aa
 int string pose_lying 0x7f0e00a5
 int string pose_sitting 0x7f0e00a6
 int string pose_standing 0x7f0e00a7
 int string pose_unknown 0x7f0e00a8
+int string pose_walking 0x7f0e00ab
 int string search_menu_title 0x7f0e0099
 int string searchbar_scrolling_view_behavior 0x7f0e009a
 int string searchview_clear_text_content_description 0x7f0e009b

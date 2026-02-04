@@ -4,74 +4,31 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WebRTC Viewer</title>
-    <style>
-      html, body {
-        margin: 0;
-        padding: 0;
-        background: #000;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      #grid {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-        width: min(100vw, 1280px);
-        padding: 12px;
-        box-sizing: border-box;
-      }
-      .videoFrame {
-        position: relative;
-        aspect-ratio: 4 / 3;
-        background: #000;
-      }
-      .videoFrame video,
-      .videoFrame img {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        object-fit: contain;
-      }
-      .offlineImage {
-        display: none;
-        z-index: 1;
-      }
-      #viewerCount {
-        position: fixed;
-        top: 12px;
-        right: 12px;
-        z-index: 2;
-        padding: 6px 10px;
-        border-radius: 10px;
-        background: rgba(0, 0, 0, 0.6);
-        color: #fff;
-        font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-        font-size: 13px;
-        letter-spacing: 0.2px;
-      }
-    </style>
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <button id="backButton" type="button" aria-label="Back to grid">&lt;</button>
     <div id="viewerCount">Viewers: 0</div>
     <div id="grid">
-      <div class="videoFrame">
+      <div class="videoFrame" data-sender="1">
         <img id="offlineImage1" class="offlineImage" src="offline.png" alt="Offline" />
         <video id="remoteVideo1" autoplay playsinline muted></video>
+        <div id="poseLabel1" class="poseLabel"></div>
       </div>
-      <div class="videoFrame">
+      <div class="videoFrame" data-sender="2">
         <img id="offlineImage2" class="offlineImage" src="offline.png" alt="Offline" />
         <video id="remoteVideo2" autoplay playsinline muted></video>
+        <div id="poseLabel2" class="poseLabel"></div>
       </div>
-      <div class="videoFrame">
+      <div class="videoFrame" data-sender="3">
         <img id="offlineImage3" class="offlineImage" src="offline.png" alt="Offline" />
         <video id="remoteVideo3" autoplay playsinline muted></video>
+        <div id="poseLabel3" class="poseLabel"></div>
       </div>
-      <div class="videoFrame">
+      <div class="videoFrame" data-sender="4">
         <img id="offlineImage4" class="offlineImage" src="offline.png" alt="Offline" />
         <video id="remoteVideo4" autoplay playsinline muted></video>
+        <div id="poseLabel4" class="poseLabel"></div>
       </div>
     </div>
     <script src="viewer.js"></script>

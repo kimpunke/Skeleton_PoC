@@ -10,5 +10,7 @@
     <string name="pose_lying">Lying</string>
     <string name="pose_sitting">Sitting</string>
     <string name="pose_standing">Standing</string>
+    <string name="pose_crouching">Crouching</string>
+    <string name="pose_walking">Walking</string>
     <string name="text_empty"></string>
 </resources>
