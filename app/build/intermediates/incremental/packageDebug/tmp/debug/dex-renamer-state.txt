@@ -1,4 +1,4 @@
-#Wed Feb 04 15:15:44 KST 2026
+#Thu Feb 05 13:35:02 KST 2026
 base.0=C\:\\Users\\User\\Desktop\\mediapipe\\app\\build\\intermediates\\dex\\debug\\mergeExtDexDebug\\classes.dex
 base.1=C\:\\Users\\User\\Desktop\\mediapipe\\app\\build\\intermediates\\dex\\debug\\mergeProjectDexDebug\\0\\classes.dex
 base.2=C\:\\Users\\User\\Desktop\\mediapipe\\app\\build\\intermediates\\dex\\debug\\mergeProjectDexDebug\\8\\classes.dex

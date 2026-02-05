@@ -3924,6 +3924,7 @@ int string path_password_eye_mask_strike_through 0x7f0e0096
 int string path_password_eye_mask_visible 0x7f0e0097
 int string path_password_strike_through 0x7f0e0098
 int string pose_crouching 0x7f0e00aa
+int string pose_fallen 0x7f0e00ac
 int string pose_lying 0x7f0e00a5
 int string pose_sitting 0x7f0e00a6
 int string pose_standing 0x7f0e00a7

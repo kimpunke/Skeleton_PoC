@@ -8,6 +8,7 @@
     <string name="mode_hand">Hand</string>
     <string name="pose_unknown">Unknown</string>
     <string name="pose_lying">Lying</string>
+    <string name="pose_fallen">Fallen</string>
     <string name="pose_sitting">Sitting</string>
     <string name="pose_standing">Standing</string>
     <string name="pose_crouching">Crouching</string>

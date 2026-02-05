@@ -8,11 +8,125 @@ import wrtc from "wrtc";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "public");
+const clipsDir = path.join(__dirname, "clips");
+
+if (!fs.existsSync(clipsDir)) {
+  fs.mkdirSync(clipsDir, { recursive: true });
+}
+
+const formatClipStamp = (date) => {
+  const pad2 = (value) => String(value).padStart(2, "0");
+  const pad3 = (value) => String(value).padStart(3, "0");
+  return `${date.getFullYear()}${pad2(date.getMonth() + 1)}${pad2(date.getDate())}`
+    + `-${pad2(date.getHours())}${pad2(date.getMinutes())}${pad2(date.getSeconds())}`
+    + `-${pad3(date.getMilliseconds())}`;
+};
+
+const parseClipStamp = (stamp) => {
+  const match = stamp.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-(\d{3})$/);
+  if (!match) {
+    return null;
+  }
+  const [, year, month, day, hour, minute, second, milli] = match;
+  return new Date(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+    Number(milli)
+  );
+};
+
+const buildClipInfo = (filename, stats) => {
+  const match = filename.match(/^fall-(\w+)-(\d{8}-\d{6}-\d{3})\.webm$/);
+  const senderId = match ? match[1] : "unknown";
+  const parsedDate = match ? parseClipStamp(match[2]) : null;
+  const timestamp = (parsedDate || stats.mtime).toISOString();
+  return {
+    id: filename,
+    filename,
+    url: `/clips/${filename}`,
+    senderId,
+    timestamp,
+    createdAt: stats.mtime.toISOString()
+  };
+};
 
 const server = http.createServer((req, res) => {
   const urlPath = req.url === "/" ? "/index.html" : req.url;
   const safePath = urlPath.split("?")[0];
-  const filePath = path.join(publicDir, safePath);
+
+  if (safePath === "/api/fall-clips") {
+    if (req.method === "GET") {
+      fs.readdir(clipsDir, (err, files) => {
+        if (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "failed" }));
+          return;
+        }
+        const clips = files
+          .filter((file) => file.endsWith(".webm"))
+          .map((file) => buildClipInfo(file, fs.statSync(path.join(clipsDir, file))))
+          .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(clips));
+      });
+      return;
+    }
+    if (req.method === "POST") {
+      const senderHeader = req.headers["x-fall-sender"] || "unknown";
+      const senderId = String(senderHeader).replace(/[^0-9a-z]/gi, "") || "unknown";
+      const timestampHeader = req.headers["x-fall-timestamp"];
+      const timestamp = timestampHeader ? new Date(String(timestampHeader)) : new Date();
+      const clipDate = Number.isNaN(timestamp.getTime()) ? new Date() : timestamp;
+      const clipStamp = formatClipStamp(clipDate);
+      const filename = `fall-${senderId}-${clipStamp}.webm`;
+      const filePath = path.join(clipsDir, filename);
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const buffer = Buffer.concat(chunks);
+        if (buffer.length === 0) {
+          res.writeHead(400, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "empty" }));
+          return;
+        }
+        fs.writeFile(filePath, buffer, (writeErr) => {
+          if (writeErr) {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "write-failed" }));
+            return;
+          }
+          const stats = fs.statSync(filePath);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(buildClipInfo(filename, stats)));
+        });
+      });
+      return;
+    }
+    res.writeHead(405, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "method-not-allowed" }));
+    return;
+  }
+
+  let filePath = null;
+  if (safePath.startsWith("/clips/")) {
+    const clipName = path.basename(safePath);
+    filePath = path.join(clipsDir, clipName);
+  } else {
+    filePath = path.join(publicDir, safePath);
+  }
+
+  const resolved = path.resolve(filePath);
+  const baseDir = safePath.startsWith("/clips/") ? clipsDir : publicDir;
+  if (!resolved.startsWith(baseDir)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return;
+  }
+
   fs.readFile(filePath, (err, data) => {
     if (err) {
       res.writeHead(404);
@@ -23,8 +137,12 @@ const server = http.createServer((req, res) => {
       res.setHeader("Content-Type", "text/html");
     } else if (filePath.endsWith(".js")) {
       res.setHeader("Content-Type", "text/javascript");
+    } else if (filePath.endsWith(".css")) {
+      res.setHeader("Content-Type", "text/css");
     } else if (filePath.endsWith(".png")) {
       res.setHeader("Content-Type", "image/png");
+    } else if (filePath.endsWith(".webm")) {
+      res.setHeader("Content-Type", "video/webm");
     }
     res.writeHead(200);
     res.end(data);
@@ -45,6 +163,22 @@ const CROUCH_HIP_HEEL_THRESHOLD = 0.18;
 const CROUCH_HIP_HEEL_X_THRESHOLD = 0.08;
 const CROUCH_MIN_CONFIDENCE = 0.6;
 const WALKING_SPEED_THRESHOLD = 0.08;
+const FALL_UPRIGHT_FRAMES = 10;
+const FALL_IMPULSE_FRAMES = 12;
+const FALL_POST_FRAMES = 18;
+const FALL_POST_STILL_FRAMES = 12;
+const FALL_POST_TIMEOUT_FRAMES = 30;
+const FALL_RECOVERY_FRAMES = 15;
+const FALL_HIP_DROP_THRESHOLD = 0.16;
+const FALL_DOWN_SPEED_THRESHOLD = 0.8;
+const FALL_STILL_SPEED_THRESHOLD = 0.25;
+const FALL_MIN_BBOX_HEIGHT = 0.15;
+const FALL_ANGLE_CHANGE_THRESHOLD = 40;
+const FALL_ASPECT_CHANGE_THRESHOLD = 0.45;
+const FALL_UPRIGHT_ANGLE = 25;
+const FALL_LYING_ANGLE = 60;
+const FALL_UPRIGHT_ASPECT = 1.35;
+const FALL_LYING_ASPECT = 1.1;
 
 const getLandmark = (landmarks, index) => {
   if (!Array.isArray(landmarks) || index < 0 || index >= landmarks.length) {
@@ -139,6 +273,143 @@ const isWalking = (landmarks, senderState, kneeAngle) => {
   return speed > WALKING_SPEED_THRESHOLD;
 };
 
+const recordFallHistory = (senderState, comY, downSpeed, torsoAngle, aspectRatio) => {
+  if (!senderState) {
+    return;
+  }
+  const index = senderState.fallHistoryIndex || 0;
+  senderState.comYHistory[index] = comY;
+  senderState.downSpeedHistory[index] = downSpeed;
+  senderState.angleHistory[index] = torsoAngle;
+  senderState.aspectHistory[index] = aspectRatio;
+  senderState.fallHistoryIndex = (index + 1) % FALL_IMPULSE_FRAMES;
+  senderState.fallHistoryCount = Math.min(
+    (senderState.fallHistoryCount || 0) + 1,
+    FALL_IMPULSE_FRAMES
+  );
+};
+
+const isFallImpulse = (senderState, comY, normHeight) => {
+  if (!senderState || senderState.fallHistoryCount < FALL_IMPULSE_FRAMES) {
+    return false;
+  }
+  let minComY = senderState.comYHistory[0];
+  let minAngle = senderState.angleHistory[0];
+  let maxAngle = senderState.angleHistory[0];
+  let minAspect = senderState.aspectHistory[0];
+  let maxAspect = senderState.aspectHistory[0];
+  let maxDownSpeed = senderState.downSpeedHistory[0];
+  for (let i = 1; i < senderState.fallHistoryCount; i += 1) {
+    minComY = Math.min(minComY, senderState.comYHistory[i]);
+    minAngle = Math.min(minAngle, senderState.angleHistory[i]);
+    maxAngle = Math.max(maxAngle, senderState.angleHistory[i]);
+    minAspect = Math.min(minAspect, senderState.aspectHistory[i]);
+    maxAspect = Math.max(maxAspect, senderState.aspectHistory[i]);
+    maxDownSpeed = Math.max(maxDownSpeed, senderState.downSpeedHistory[i]);
+  }
+  const hipDrop = (comY - minComY) / normHeight;
+  const angleChange = maxAngle - minAngle;
+  const aspectChange = maxAspect - minAspect;
+  return hipDrop > FALL_HIP_DROP_THRESHOLD
+    && maxDownSpeed > FALL_DOWN_SPEED_THRESHOLD
+    && angleChange > FALL_ANGLE_CHANGE_THRESHOLD
+    && aspectChange > FALL_ASPECT_CHANGE_THRESHOLD;
+};
+
+const updateFallState = (senderState, comX, comY, torsoAngle, aspectRatio, bboxHeight, now) => {
+  if (!senderState) {
+    return false;
+  }
+  const normHeight = Math.max(bboxHeight, FALL_MIN_BBOX_HEIGHT);
+  let downSpeed = 0;
+  let speed = 0;
+  if (senderState.lastFallSampleTimestampMs) {
+    const dt = (now - senderState.lastFallSampleTimestampMs) / 1000;
+    if (dt > 0) {
+      const dx = comX - senderState.lastComX;
+      const dy = comY - senderState.lastComY;
+      speed = Math.hypot(dx, dy) / dt / normHeight;
+      downSpeed = dy / dt / normHeight;
+    }
+  }
+  senderState.lastComX = comX;
+  senderState.lastComY = comY;
+  senderState.lastFallSampleTimestampMs = now;
+
+  recordFallHistory(senderState, comY, downSpeed, torsoAngle, aspectRatio);
+  const upright = torsoAngle < FALL_UPRIGHT_ANGLE && aspectRatio > FALL_UPRIGHT_ASPECT;
+  const lying = torsoAngle > FALL_LYING_ANGLE && aspectRatio < FALL_LYING_ASPECT;
+  const fallImpulse = isFallImpulse(senderState, comY, normHeight);
+
+  switch (senderState.fallState) {
+    case "IDLE":
+      if (upright) {
+        senderState.uprightFrames += 1;
+        if (senderState.uprightFrames >= FALL_UPRIGHT_FRAMES) {
+          senderState.fallState = "ARMED";
+        }
+      } else {
+        senderState.uprightFrames = 0;
+      }
+      break;
+    case "ARMED":
+      if (fallImpulse) {
+        senderState.fallState = "POST";
+        senderState.postFrames = 0;
+        senderState.postTimeoutFrames = 0;
+      }
+      if (!upright) {
+        senderState.uprightFrames = 0;
+      }
+      break;
+    case "POST":
+      if (lying) {
+        senderState.postFrames += 1;
+        if (speed < FALL_STILL_SPEED_THRESHOLD) {
+          senderState.postStillFrames += 1;
+        } else {
+          senderState.postStillFrames = 0;
+        }
+        senderState.postTimeoutFrames = 0;
+      } else {
+        senderState.postFrames = 0;
+        senderState.postStillFrames = 0;
+        senderState.postTimeoutFrames += 1;
+      }
+      if (senderState.postFrames >= FALL_POST_FRAMES
+          && senderState.postStillFrames >= FALL_POST_STILL_FRAMES) {
+        senderState.fallState = "FALLEN";
+        senderState.recoveryFrames = 0;
+      } else if (senderState.postTimeoutFrames >= FALL_POST_TIMEOUT_FRAMES) {
+        resetFallState(senderState);
+      }
+      break;
+    case "FALLEN":
+      if (upright) {
+        senderState.recoveryFrames += 1;
+        if (senderState.recoveryFrames >= FALL_RECOVERY_FRAMES) {
+          resetFallState(senderState);
+        }
+      } else {
+        senderState.recoveryFrames = 0;
+      }
+      break;
+    default:
+      break;
+  }
+
+  return senderState.fallState === "FALLEN";
+};
+
+const resetFallState = (senderState) => {
+  senderState.fallState = "IDLE";
+  senderState.uprightFrames = 0;
+  senderState.postFrames = 0;
+  senderState.postStillFrames = 0;
+  senderState.postTimeoutFrames = 0;
+  senderState.recoveryFrames = 0;
+};
+
 const classifyPose = (landmarks, senderState) => {
   if (!Array.isArray(landmarks) || landmarks.length < MIN_POSE_LANDMARKS) {
     return "Unknown";
@@ -171,7 +442,36 @@ const classifyPose = (landmarks, senderState) => {
 
   const torsoDx = Math.abs(shoulderX - hipX);
   const torsoDy = Math.abs(shoulderY - hipY);
-  if (torsoDx > torsoDy * 1.2) {
+  const torsoAngle = Math.atan2(torsoDx, torsoDy) * (180 / Math.PI);
+  const comX = (shoulderX + hipX) * 0.5;
+  const comY = (shoulderY + hipY) * 0.5;
+  let minX = 1;
+  let maxX = 0;
+  let minY = 1;
+  let maxY = 0;
+  for (const entry of landmarks) {
+    if (!Array.isArray(entry) || entry.length < 2) {
+      continue;
+    }
+    const x = Number(entry[0]);
+    const y = Number(entry[1]);
+    if (Number.isNaN(x) || Number.isNaN(y)) {
+      continue;
+    }
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y);
+    maxY = Math.max(maxY, y);
+  }
+  const bboxWidth = Math.max(maxX - minX, 1e-6);
+  const bboxHeight = Math.max(maxY - minY, 1e-6);
+  const aspectRatio = bboxHeight / bboxWidth;
+  const torsoHorizontal = torsoDx > torsoDy * 1.2;
+  const now = Date.now();
+  if (updateFallState(senderState, comX, comY, torsoAngle, aspectRatio, bboxHeight, now)) {
+    return "Fallen";
+  }
+  if (torsoHorizontal) {
     return "Lying";
   }
 
@@ -368,7 +668,22 @@ wss.on("connection", (socket, req) => {
       stream: null,
       lastAnkleTimestampMs: 0,
       lastLeftAnkle: null,
-      lastRightAnkle: null
+      lastRightAnkle: null,
+      comYHistory: new Array(FALL_IMPULSE_FRAMES).fill(0),
+      downSpeedHistory: new Array(FALL_IMPULSE_FRAMES).fill(0),
+      angleHistory: new Array(FALL_IMPULSE_FRAMES).fill(0),
+      aspectHistory: new Array(FALL_IMPULSE_FRAMES).fill(0),
+      fallHistoryIndex: 0,
+      fallHistoryCount: 0,
+      uprightFrames: 0,
+      postFrames: 0,
+      postStillFrames: 0,
+      postTimeoutFrames: 0,
+      recoveryFrames: 0,
+      lastComX: 0,
+      lastComY: 0,
+      lastFallSampleTimestampMs: 0,
+      fallState: "IDLE"
     });
     createSenderPeer(senderId);
   }

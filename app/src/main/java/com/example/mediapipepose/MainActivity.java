@@ -56,6 +56,22 @@ public class MainActivity extends AppCompatActivity {
     private static final float CROUCH_MIN_CONFIDENCE = 0.6f;
     private static final float CROUCH_HIP_HEEL_X_THRESHOLD = 0.08f;
     private static final float WALKING_SPEED_THRESHOLD = 0.08f;
+    private static final int FALL_UPRIGHT_FRAMES = 10;
+    private static final int FALL_IMPULSE_FRAMES = 12;
+    private static final int FALL_POST_FRAMES = 18;
+    private static final int FALL_POST_STILL_FRAMES = 12;
+    private static final int FALL_POST_TIMEOUT_FRAMES = 30;
+    private static final int FALL_RECOVERY_FRAMES = 15;
+    private static final float FALL_HIP_DROP_THRESHOLD = 0.16f;
+    private static final float FALL_DOWN_SPEED_THRESHOLD = 0.8f;
+    private static final float FALL_STILL_SPEED_THRESHOLD = 0.25f;
+    private static final float FALL_MIN_BBOX_HEIGHT = 0.15f;
+    private static final float FALL_ANGLE_CHANGE_THRESHOLD = 40f;
+    private static final float FALL_ASPECT_CHANGE_THRESHOLD = 0.45f;
+    private static final float FALL_UPRIGHT_ANGLE = 25f;
+    private static final float FALL_LYING_ANGLE = 60f;
+    private static final float FALL_UPRIGHT_ASPECT = 1.35f;
+    private static final float FALL_LYING_ASPECT = 1.1f;
     private static final String TAG = "PoseTracking";
 
     private enum RenderMode {
@@ -63,6 +79,13 @@ public class MainActivity extends AppCompatActivity {
         POSE_HAND,
         FACE,
         HAND
+    }
+
+    private enum FallState {
+        IDLE,
+        ARMED,
+        POST_FALL,
+        FALLEN
     }
 
     private PreviewView previewView;
@@ -88,6 +111,21 @@ public class MainActivity extends AppCompatActivity {
     private float lastLeftAnkleY = Float.NaN;
     private float lastRightAnkleX = Float.NaN;
     private float lastRightAnkleY = Float.NaN;
+    private final float[] comYHistory = new float[FALL_IMPULSE_FRAMES];
+    private final float[] angleHistory = new float[FALL_IMPULSE_FRAMES];
+    private final float[] aspectHistory = new float[FALL_IMPULSE_FRAMES];
+    private final float[] downSpeedHistory = new float[FALL_IMPULSE_FRAMES];
+    private int fallHistoryIndex = 0;
+    private int fallHistoryCount = 0;
+    private int uprightFrames = 0;
+    private int postFrames = 0;
+    private int postStillFrames = 0;
+    private int postTimeoutFrames = 0;
+    private int recoveryFrames = 0;
+    private float lastComX = Float.NaN;
+    private float lastComY = Float.NaN;
+    private long lastFallSampleTimestampMs = 0;
+    private FallState fallState = FallState.IDLE;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -409,6 +447,16 @@ public class MainActivity extends AppCompatActivity {
 
         float torsoDx = Math.abs(shoulderX - hipX);
         float torsoDy = Math.abs(shoulderY - hipY);
+        float torsoAngle = (float) Math.toDegrees(Math.atan2(torsoDx, torsoDy));
+        float comX = (shoulderX + hipX) * 0.5f;
+        float comY = (shoulderY + hipY) * 0.5f;
+        float[] bbox = computeBoundingBox(landmarks);
+        float aspectRatio = computeAspectRatio(bbox);
+        float bboxHeight = Math.max(bbox[3] - bbox[2], 1e-6f);
+        long now = System.currentTimeMillis();
+        if (updateFallState(comX, comY, torsoAngle, aspectRatio, bboxHeight, now)) {
+            return getString(R.string.pose_fallen);
+        }
         if (torsoDx > torsoDy * 1.2f) {
             return getString(R.string.pose_lying);
         }
@@ -444,6 +492,169 @@ public class MainActivity extends AppCompatActivity {
             return getString(R.string.pose_walking);
         }
         return getString(R.string.pose_standing);
+    }
+
+    private boolean updateFallState(
+            float comX,
+            float comY,
+            float torsoAngle,
+            float aspectRatio,
+            float bboxHeight,
+            long now) {
+        float normHeight = Math.max(bboxHeight, FALL_MIN_BBOX_HEIGHT);
+        float downSpeed = 0f;
+        float speed = 0f;
+        if (lastFallSampleTimestampMs > 0) {
+            float dt = (now - lastFallSampleTimestampMs) / 1000f;
+            if (dt > 0f) {
+                float dx = comX - lastComX;
+                float dy = comY - lastComY;
+                speed = (float) Math.hypot(dx, dy) / dt / normHeight;
+                downSpeed = dy / dt / normHeight;
+            }
+        }
+        lastComX = comX;
+        lastComY = comY;
+        lastFallSampleTimestampMs = now;
+
+        recordFallHistory(comY, downSpeed, torsoAngle, aspectRatio);
+        boolean upright = torsoAngle < FALL_UPRIGHT_ANGLE && aspectRatio > FALL_UPRIGHT_ASPECT;
+        boolean lying = torsoAngle > FALL_LYING_ANGLE && aspectRatio < FALL_LYING_ASPECT;
+        boolean fallImpulse = isFallImpulse(comY, normHeight);
+
+        switch (fallState) {
+            case IDLE:
+                if (upright) {
+                    uprightFrames += 1;
+                    if (uprightFrames >= FALL_UPRIGHT_FRAMES) {
+                        fallState = FallState.ARMED;
+                    }
+                } else {
+                    uprightFrames = 0;
+                }
+                break;
+            case ARMED:
+                if (fallImpulse) {
+                    fallState = FallState.POST_FALL;
+                    postFrames = 0;
+                    postTimeoutFrames = 0;
+                }
+                if (!upright) {
+                    uprightFrames = 0;
+                }
+                break;
+            case POST_FALL:
+                if (lying) {
+                    postFrames += 1;
+                    if (speed < FALL_STILL_SPEED_THRESHOLD) {
+                        postStillFrames += 1;
+                    } else {
+                        postStillFrames = 0;
+                    }
+                    postTimeoutFrames = 0;
+                } else {
+                    postFrames = 0;
+                    postStillFrames = 0;
+                    postTimeoutFrames += 1;
+                }
+                if (postFrames >= FALL_POST_FRAMES && postStillFrames >= FALL_POST_STILL_FRAMES) {
+                    fallState = FallState.FALLEN;
+                    recoveryFrames = 0;
+                } else if (postTimeoutFrames >= FALL_POST_TIMEOUT_FRAMES) {
+                    resetFallState();
+                }
+                break;
+            case FALLEN:
+                if (upright) {
+                    recoveryFrames += 1;
+                    if (recoveryFrames >= FALL_RECOVERY_FRAMES) {
+                        resetFallState();
+                    }
+                } else {
+                    recoveryFrames = 0;
+                }
+                break;
+            default:
+                break;
+        }
+
+        return fallState == FallState.FALLEN;
+    }
+
+    private void recordFallHistory(
+            float comY,
+            float downSpeed,
+            float torsoAngle,
+            float aspectRatio) {
+        comYHistory[fallHistoryIndex] = comY;
+        downSpeedHistory[fallHistoryIndex] = downSpeed;
+        angleHistory[fallHistoryIndex] = torsoAngle;
+        aspectHistory[fallHistoryIndex] = aspectRatio;
+        fallHistoryIndex = (fallHistoryIndex + 1) % FALL_IMPULSE_FRAMES;
+        if (fallHistoryCount < FALL_IMPULSE_FRAMES) {
+            fallHistoryCount += 1;
+        }
+    }
+
+    private boolean isFallImpulse(float comY, float normHeight) {
+        if (fallHistoryCount < FALL_IMPULSE_FRAMES) {
+            return false;
+        }
+        float minComY = comYHistory[0];
+        float minAngle = angleHistory[0];
+        float maxAngle = angleHistory[0];
+        float minAspect = aspectHistory[0];
+        float maxAspect = aspectHistory[0];
+        float maxDownSpeed = downSpeedHistory[0];
+        for (int i = 1; i < fallHistoryCount; i++) {
+            minComY = Math.min(minComY, comYHistory[i]);
+            minAngle = Math.min(minAngle, angleHistory[i]);
+            maxAngle = Math.max(maxAngle, angleHistory[i]);
+            minAspect = Math.min(minAspect, aspectHistory[i]);
+            maxAspect = Math.max(maxAspect, aspectHistory[i]);
+            maxDownSpeed = Math.max(maxDownSpeed, downSpeedHistory[i]);
+        }
+        float hipDrop = (comY - minComY) / normHeight;
+        float angleChange = maxAngle - minAngle;
+        float aspectChange = maxAspect - minAspect;
+        return hipDrop > FALL_HIP_DROP_THRESHOLD
+                && maxDownSpeed > FALL_DOWN_SPEED_THRESHOLD
+                && angleChange > FALL_ANGLE_CHANGE_THRESHOLD
+                && aspectChange > FALL_ASPECT_CHANGE_THRESHOLD;
+    }
+
+    private void resetFallState() {
+        fallState = FallState.IDLE;
+        uprightFrames = 0;
+        postFrames = 0;
+        postStillFrames = 0;
+        postTimeoutFrames = 0;
+        recoveryFrames = 0;
+    }
+
+    private float[] computeBoundingBox(List<NormalizedLandmark> landmarks) {
+        float minX = 1f;
+        float maxX = 0f;
+        float minY = 1f;
+        float maxY = 0f;
+        for (NormalizedLandmark landmark : landmarks) {
+            if (landmark == null) {
+                continue;
+            }
+            float x = landmark.x();
+            float y = landmark.y();
+            minX = Math.min(minX, x);
+            maxX = Math.max(maxX, x);
+            minY = Math.min(minY, y);
+            maxY = Math.max(maxY, y);
+        }
+        return new float[]{minX, maxX, minY, maxY};
+    }
+
+    private float computeAspectRatio(float[] bbox) {
+        float width = Math.max(bbox[1] - bbox[0], 1e-6f);
+        float height = Math.max(bbox[3] - bbox[2], 1e-6f);
+        return height / width;
     }
 
     private boolean isWalking(List<NormalizedLandmark> landmarks, float kneeAngle) {

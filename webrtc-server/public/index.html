@@ -7,8 +7,13 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <div id="headerHost"></div>
     <button id="backButton" type="button" aria-label="Back to grid">&lt;</button>
     <div id="viewerCount">Viewers: 0</div>
+    <div id="fallAlert" role="status" aria-live="polite">
+      <span id="fallAlertText"></span>
+      <button id="fallAlertClose" type="button" aria-label="Close alert">×</button>
+    </div>
     <div id="grid">
       <div class="videoFrame" data-sender="1">
         <img id="offlineImage1" class="offlineImage" src="offline.png" alt="Offline" />
@@ -29,6 +34,12 @@
         <img id="offlineImage4" class="offlineImage" src="offline.png" alt="Offline" />
         <video id="remoteVideo4" autoplay playsinline muted></video>
         <div id="poseLabel4" class="poseLabel"></div>
+      </div>
+    </div>
+    <div id="exceptionView">
+      <div id="exceptionList" class="exceptionList"></div>
+      <div class="exceptionPlayer">
+        <video id="exceptionPlayer" controls playsinline></video>
       </div>
     </div>
     <script src="viewer.js"></script>
