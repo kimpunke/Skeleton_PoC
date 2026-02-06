@@ -8,6 +8,30 @@
   </head>
   <body>
     <div id="headerHost"></div>
+    <div id="loginOverlay" class="loginOverlay" aria-label="Login">
+      <div class="loginPanel">
+        <div class="loginTitle">Login</div>
+        <form id="authForm" autocomplete="off">
+          <input
+            id="authUsername"
+            type="text"
+            placeholder="Username"
+            aria-label="Username"
+          />
+          <div class="passwordRow">
+            <input
+              id="authPassword"
+              type="password"
+              placeholder="Password"
+              aria-label="Password"
+            />
+            <button id="togglePassword" type="button">Show</button>
+          </div>
+          <button id="authSubmit" type="submit">Login</button>
+        </form>
+        <div id="authError" class="authError"></div>
+      </div>
+    </div>
     <button id="backButton" type="button" aria-label="Back to grid">&lt;</button>
     <div id="viewerCount">Viewers: 0</div>
     <div id="fallAlert" role="status" aria-live="polite">
@@ -40,7 +64,39 @@
       <div id="exceptionList" class="exceptionList"></div>
       <div class="exceptionPlayer">
         <video id="exceptionPlayer" controls playsinline></video>
+        <div class="exceptionComments">
+          <div class="exceptionCommentsTitle">Comments</div>
+          <div id="exceptionCommentList" class="exceptionCommentList"></div>
+          <form id="exceptionCommentForm" class="exceptionCommentForm" autocomplete="off">
+            <input
+              id="exceptionCommentInput"
+              type="text"
+              placeholder="Add comment"
+              aria-label="Add comment"
+            />
+            <button id="exceptionCommentSend" type="submit">Post</button>
+          </form>
+        </div>
       </div>
+    </div>
+    <div id="commandPanel" aria-label="Command panel">
+      <div class="commandTitle">Command</div>
+      <div id="commandUser" class="commandUser"></div>
+      <form id="commandForm" autocomplete="off">
+        <input
+          id="commandInput"
+          type="text"
+          placeholder="Type a command and press Enter"
+          aria-label="Command input"
+        />
+        <button id="commandSend" type="submit">Send</button>
+      </form>
+      <div class="commandHistoryTitle">History</div>
+      <div id="commandHistory" class="commandHistory" aria-live="polite"></div>
+    </div>
+    <div id="footer" class="footer">
+      <div id="footerUser" class="footerUser"></div>
+      <button id="logoutButton" type="button">Logout</button>
     </div>
     <script src="viewer.js"></script>
   </body>

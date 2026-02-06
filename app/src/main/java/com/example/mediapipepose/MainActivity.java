@@ -1,11 +1,17 @@
 package com.example.mediapipepose;
 
 import android.Manifest;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.Size;
+import android.view.View;
 import androidx.camera.core.AspectRatio;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
@@ -15,8 +21,11 @@ import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
+import androidx.core.app.NotificationCompat;
+import androidx.core.app.NotificationManagerCompat;
 import androidx.core.content.ContextCompat;
 import android.widget.Button;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.mediapipe.framework.image.BitmapImageBuilder;
@@ -34,6 +43,7 @@ import com.google.mediapipe.tasks.components.containers.NormalizedLandmark;
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker;
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker.PoseLandmarkerOptions;
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarkerResult;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,6 +53,10 @@ import org.webrtc.VideoFrame;
 
 public class MainActivity extends AppCompatActivity {
     private static final int REQUEST_CODE_CAMERA = 1001;
+    private static final int REQUEST_CODE_NOTIFICATIONS = 1002;
+    private static final String COMMAND_CHANNEL_ID = "command_alerts";
+    private static final String COMMAND_CHANNEL_NAME = "Command alerts";
+    private static final String EXTRA_OPEN_CHAT = "open_chat";
     private static final String MODEL_ASSET_PATH = "pose_landmarker_full.task";
     private static final String FACE_MODEL_ASSET_PATH = "face_landmarker.task";
     private static final String HAND_MODEL_ASSET_PATH = "hand_landmarker.task";
@@ -56,22 +70,22 @@ public class MainActivity extends AppCompatActivity {
     private static final float CROUCH_MIN_CONFIDENCE = 0.6f;
     private static final float CROUCH_HIP_HEEL_X_THRESHOLD = 0.08f;
     private static final float WALKING_SPEED_THRESHOLD = 0.08f;
-    private static final int FALL_UPRIGHT_FRAMES = 10;
-    private static final int FALL_IMPULSE_FRAMES = 12;
-    private static final int FALL_POST_FRAMES = 18;
-    private static final int FALL_POST_STILL_FRAMES = 12;
-    private static final int FALL_POST_TIMEOUT_FRAMES = 30;
-    private static final int FALL_RECOVERY_FRAMES = 15;
-    private static final float FALL_HIP_DROP_THRESHOLD = 0.16f;
-    private static final float FALL_DOWN_SPEED_THRESHOLD = 0.8f;
-    private static final float FALL_STILL_SPEED_THRESHOLD = 0.25f;
+    private static final int FALL_UPRIGHT_FRAMES = 12;
+    private static final int FALL_IMPULSE_FRAMES = 14;
+    private static final int FALL_POST_FRAMES = 24;
+    private static final int FALL_POST_STILL_FRAMES = 16;
+    private static final int FALL_POST_TIMEOUT_FRAMES = 36;
+    private static final int FALL_RECOVERY_FRAMES = 18;
+    private static final float FALL_HIP_DROP_THRESHOLD = 0.2f;
+    private static final float FALL_DOWN_SPEED_THRESHOLD = 1.0f;
+    private static final float FALL_STILL_SPEED_THRESHOLD = 0.2f;
     private static final float FALL_MIN_BBOX_HEIGHT = 0.15f;
-    private static final float FALL_ANGLE_CHANGE_THRESHOLD = 40f;
-    private static final float FALL_ASPECT_CHANGE_THRESHOLD = 0.45f;
-    private static final float FALL_UPRIGHT_ANGLE = 25f;
-    private static final float FALL_LYING_ANGLE = 60f;
-    private static final float FALL_UPRIGHT_ASPECT = 1.35f;
-    private static final float FALL_LYING_ASPECT = 1.1f;
+    private static final float FALL_ANGLE_CHANGE_THRESHOLD = 50f;
+    private static final float FALL_ASPECT_CHANGE_THRESHOLD = 0.55f;
+    private static final float FALL_UPRIGHT_ANGLE = 22f;
+    private static final float FALL_LYING_ANGLE = 65f;
+    private static final float FALL_UPRIGHT_ASPECT = 1.4f;
+    private static final float FALL_LYING_ASPECT = 1.05f;
     private static final String TAG = "PoseTracking";
 
     private enum RenderMode {
@@ -92,6 +106,11 @@ public class MainActivity extends AppCompatActivity {
     private PoseOverlayView overlayView;
     private TextView modeText;
     private TextView poseClassText;
+    private View commandHistoryContainer;
+    private ScrollView commandHistoryScroll;
+    private TextView commandHistoryText;
+    private final List<String> commandHistory = new ArrayList<>();
+    private Button chatButton;
     private SurfaceViewRenderer remoteView;
     private EglBase eglBase;
     private ExecutorService cameraExecutor;
@@ -137,6 +156,10 @@ public class MainActivity extends AppCompatActivity {
         overlayView.setMirror(true);
         modeText = findViewById(R.id.text_mode);
         poseClassText = findViewById(R.id.text_pose_class);
+        commandHistoryContainer = findViewById(R.id.command_history_container);
+        commandHistoryScroll = findViewById(R.id.command_history_scroll);
+        commandHistoryText = findViewById(R.id.text_command_history);
+        chatButton = findViewById(R.id.button_chat);
         remoteView = findViewById(R.id.remote_view);
         eglBase = EglBase.create();
         remoteView.init(eglBase.getEglBaseContext(), null);
@@ -145,6 +168,9 @@ public class MainActivity extends AppCompatActivity {
         switchButton.setOnClickListener(view -> switchCamera());
         Button modeButton = findViewById(R.id.button_switch_mode);
         modeButton.setOnClickListener(view -> switchMode());
+        if (chatButton != null) {
+            chatButton.setOnClickListener(view -> toggleCommandHistory());
+        }
         cameraExecutor = Executors.newSingleThreadExecutor();
 
         setupPoseLandmarker();
@@ -152,7 +178,14 @@ public class MainActivity extends AppCompatActivity {
         webRtcStreamer = new WebRtcStreamer(this);
         webRtcStreamer.setRemoteRenderer(remoteView);
         webRtcStreamer.setPoseLabelListener(this::handleServerPoseLabel);
+        webRtcStreamer.setCommandListener(this::handleServerCommand);
+        webRtcStreamer.setCommandEntryListener(this::handleCommandEntry);
+        webRtcStreamer.setCommandHistoryListener(this::handleCommandHistory);
         webRtcStreamer.start(signalingUrl);
+
+        ensureCommandNotificationChannel();
+        requestNotificationPermissionIfNeeded();
+        handleIntent(getIntent());
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
                 == PackageManager.PERMISSION_GRANTED) {
@@ -163,6 +196,53 @@ public class MainActivity extends AppCompatActivity {
                     new String[]{Manifest.permission.CAMERA},
                     REQUEST_CODE_CAMERA
             );
+        }
+    }
+
+    private void ensureCommandNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return;
+        }
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager == null) {
+            return;
+        }
+        NotificationChannel channel = new NotificationChannel(
+                COMMAND_CHANNEL_ID,
+                COMMAND_CHANNEL_NAME,
+                NotificationManager.IMPORTANCE_HIGH);
+        channel.setDescription("Incoming commands");
+        manager.createNotificationChannel(channel);
+    }
+
+    private void requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        ActivityCompat.requestPermissions(
+                this,
+                new String[]{Manifest.permission.POST_NOTIFICATIONS},
+                REQUEST_CODE_NOTIFICATIONS
+        );
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleIntent(intent);
+    }
+
+    private void handleIntent(Intent intent) {
+        if (intent == null) {
+            return;
+        }
+        if (intent.getBooleanExtra(EXTRA_OPEN_CHAT, false)) {
+            openCommandHistory();
         }
     }
 
@@ -408,6 +488,101 @@ public class MainActivity extends AppCompatActivity {
             poseClassText.setText(label);
             overlayView.setPoseLabel(label);
         });
+    }
+
+    private void handleServerCommand(String command) {
+        if (command == null || command.trim().isEmpty()) {
+            return;
+        }
+        runOnUiThread(() -> showCommandNotification(command));
+    }
+
+    private void handleCommandEntry(String entry) {
+        if (entry == null || entry.trim().isEmpty()) {
+            return;
+        }
+        runOnUiThread(() -> appendCommandHistory(entry));
+    }
+
+    private void handleCommandHistory(List<String> entries) {
+        runOnUiThread(() -> {
+            commandHistory.clear();
+            if (entries != null && !entries.isEmpty()) {
+                commandHistory.addAll(entries);
+            }
+            renderCommandHistory();
+            if (commandHistoryContainer != null
+                    && commandHistoryContainer.getVisibility() == View.VISIBLE) {
+                openCommandHistory();
+            }
+        });
+    }
+
+    private void showCommandNotification(String command) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        Intent intent = new Intent(this, MainActivity.class);
+        intent.putExtra(EXTRA_OPEN_CHAT, true);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        int pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+        PendingIntent pendingIntent = PendingIntent.getActivity(this, 0, intent, pendingFlags);
+        NotificationCompat.Builder builder = new NotificationCompat.Builder(this, COMMAND_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(getString(R.string.app_name))
+                .setContentText(command)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent);
+        NotificationManagerCompat.from(this).notify((int) System.currentTimeMillis(), builder.build());
+    }
+
+    private void appendCommandHistory(String command) {
+        commandHistory.add(command);
+        renderCommandHistory();
+        if (commandHistoryContainer != null
+                && commandHistoryContainer.getVisibility() == View.VISIBLE) {
+            openCommandHistory();
+        }
+    }
+
+    private void renderCommandHistory() {
+        if (commandHistoryText == null) {
+            return;
+        }
+        StringBuilder builder = new StringBuilder();
+        for (String entry : commandHistory) {
+            if (builder.length() > 0) {
+                builder.append('\n');
+            }
+            builder.append(entry);
+        }
+        commandHistoryText.setText(builder.toString());
+    }
+
+    private void openCommandHistory() {
+        if (commandHistoryContainer != null) {
+            commandHistoryContainer.setVisibility(View.VISIBLE);
+        }
+        if (commandHistoryScroll != null) {
+            commandHistoryScroll.post(() -> commandHistoryScroll.fullScroll(View.FOCUS_DOWN));
+        }
+    }
+
+    private void toggleCommandHistory() {
+        if (commandHistoryContainer == null) {
+            return;
+        }
+        if (commandHistoryContainer.getVisibility() == View.VISIBLE) {
+            commandHistoryContainer.setVisibility(View.GONE);
+            return;
+        }
+        openCommandHistory();
     }
 
     private void sendPoseLandmarks(PoseLandmarkerResult result) {

@@ -4,6 +4,7 @@ import android.content.Context;
 import android.util.Log;
 import androidx.annotation.Nullable;
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
@@ -38,6 +39,18 @@ public class WebRtcStreamer {
         void onPoseLabel(String label);
     }
 
+    public interface CommandListener {
+        void onCommand(String command);
+    }
+
+    public interface CommandEntryListener {
+        void onCommandEntry(String entry);
+    }
+
+    public interface CommandHistoryListener {
+        void onCommandHistory(List<String> entries);
+    }
+
     private final Context context;
     private PeerConnectionFactory peerConnectionFactory;
     private PeerConnection peerConnection;
@@ -52,6 +65,12 @@ public class WebRtcStreamer {
     private boolean started;
     @Nullable
     private PoseLabelListener poseLabelListener;
+    @Nullable
+    private CommandListener commandListener;
+    @Nullable
+    private CommandEntryListener commandEntryListener;
+    @Nullable
+    private CommandHistoryListener commandHistoryListener;
 
     public WebRtcStreamer(Context context) {
         this.context = context.getApplicationContext();
@@ -102,6 +121,18 @@ public class WebRtcStreamer {
 
     public void setPoseLabelListener(@Nullable PoseLabelListener listener) {
         poseLabelListener = listener;
+    }
+
+    public void setCommandListener(@Nullable CommandListener listener) {
+        commandListener = listener;
+    }
+
+    public void setCommandEntryListener(@Nullable CommandEntryListener listener) {
+        commandEntryListener = listener;
+    }
+
+    public void setCommandHistoryListener(@Nullable CommandHistoryListener listener) {
+        commandHistoryListener = listener;
     }
 
     public void sendFrame(VideoFrame frame) {
@@ -361,6 +392,30 @@ public class WebRtcStreamer {
                     if (listener != null) {
                         listener.onPoseLabel(label);
                     }
+                } else if ("command".equals(type)) {
+                    String command = message.optString("text", "").trim();
+                    if (!command.isEmpty()) {
+                        CommandListener listener = commandListener;
+                        if (listener != null) {
+                            listener.onCommand(command);
+                        }
+                    }
+                } else if ("command-entry".equals(type)) {
+                    JSONObject entry = message.optJSONObject("entry");
+                    String formatted = formatCommandEntry(entry);
+                    if (!formatted.isEmpty()) {
+                        CommandEntryListener listener = commandEntryListener;
+                        if (listener != null) {
+                            listener.onCommandEntry(formatted);
+                        }
+                    }
+                } else if ("command-history".equals(type)) {
+                    JSONArray entries = message.optJSONArray("entries");
+                    List<String> result = parseCommandHistory(entries);
+                    CommandHistoryListener listener = commandHistoryListener;
+                    if (listener != null) {
+                        listener.onCommandHistory(result);
+                    }
                 }
             } catch (JSONException exception) {
                 Log.e(TAG, "Invalid signaling message", exception);
@@ -371,5 +426,35 @@ public class WebRtcStreamer {
         public void onFailure(WebSocket webSocket, Throwable t, @Nullable Response response) {
             Log.e(TAG, "WebSocket error", t);
         }
+    }
+
+    private String formatCommandEntry(@Nullable JSONObject entry) {
+        if (entry == null) {
+            return "";
+        }
+        String user = entry.optString("user", "").trim();
+        String text = entry.optString("text", "").trim();
+        if (text.isEmpty()) {
+            return "";
+        }
+        if (user.isEmpty()) {
+            return text;
+        }
+        return user + ": " + text;
+    }
+
+    private List<String> parseCommandHistory(@Nullable JSONArray entries) {
+        if (entries == null) {
+            return Collections.emptyList();
+        }
+        List<String> result = new ArrayList<>();
+        for (int i = 0; i < entries.length(); i += 1) {
+            JSONObject entry = entries.optJSONObject(i);
+            String formatted = formatCommandEntry(entry);
+            if (!formatted.isEmpty()) {
+                result.add(formatted);
+            }
+        }
+        return result;
     }
 }

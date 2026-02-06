@@ -3167,6 +3167,7 @@ id bounceBoth
 id bounceEnd
 id bounceStart
 id buttonPanel
+id button_chat
 id button_switch_camera
 id button_switch_mode
 id cache_measures
@@ -3191,6 +3192,9 @@ id clip_vertical
 id clockwise
 id closest
 id collapseActionView
+id command_history_container
+id command_history_scroll
+id command_history_title
 id compatible
 id compress
 id confirm_button
@@ -3524,6 +3528,7 @@ id textSpacerNoButtons
 id textSpacerNoTitle
 id textStart
 id textTop
+id text_command_history
 id text_input_end_icon
 id text_input_error_icon
 id text_input_start_icon

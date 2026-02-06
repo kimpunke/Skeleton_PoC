@@ -38,6 +38,50 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <LinearLayout
+        android:id="@+id/command_history_container"
+        android:layout_width="200dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_marginBottom="72dp"
+        android:layout_marginEnd="16dp"
+        android:background="#80000000"
+        android:orientation="vertical"
+        android:padding="8dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/command_history_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Chat"
+            android:textColor="@android:color/white"
+            android:textSize="12sp" />
+
+        <ScrollView
+            android:id="@+id/command_history_scroll"
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:scrollbars="vertical">
+
+            <TextView
+                android:id="@+id/text_command_history"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="@android:color/white"
+                android:textSize="12sp" />
+        </ScrollView>
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/button_chat"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="16dp"
+        android:text="Chat" />
+
     <Button
         android:id="@+id/button_switch_camera"
         android:layout_width="wrap_content"

@@ -3166,6 +3166,7 @@ int id bounceBoth 0x7f08005f
 int id bounceEnd 0x7f080060
 int id bounceStart 0x7f080061
 int id buttonPanel 0x7f080062
+int id button_chat 0x7f0801fe
 int id button_switch_camera 0x7f080063
 int id button_switch_mode 0x7f080064
 int id cache_measures 0x7f080065
@@ -3190,6 +3191,9 @@ int id clip_vertical 0x7f080077
 int id clockwise 0x7f080078
 int id closest 0x7f080079
 int id collapseActionView 0x7f08007a
+int id command_history_container 0x7f0801fa
+int id command_history_scroll 0x7f0801fb
+int id command_history_title 0x7f0801fc
 int id compatible 0x7f08007b
 int id compress 0x7f08007c
 int id confirm_button 0x7f08007d
@@ -3523,6 +3527,7 @@ int id textSpacerNoButtons 0x7f0801c3
 int id textSpacerNoTitle 0x7f0801c4
 int id textStart 0x7f0801c5
 int id textTop 0x7f0801c6
+int id text_command_history 0x7f0801fd
 int id text_input_end_icon 0x7f0801c7
 int id text_input_error_icon 0x7f0801c8
 int id text_input_start_icon 0x7f0801c9

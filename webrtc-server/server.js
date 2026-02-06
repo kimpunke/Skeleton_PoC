@@ -1,6 +1,7 @@
 import http from "http";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { WebSocketServer } from "ws";
 import { fileURLToPath } from "url";
 import wrtc from "wrtc";
@@ -9,6 +10,18 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "public");
 const clipsDir = path.join(__dirname, "clips");
+const USERS = new Map([
+  ["test1", { password: "test523320!", role: "user" }],
+  ["test2", { password: "test523320!", role: "user" }],
+  ["admin1", { password: "test523320!", role: "admin" }]
+]);
+const sessions = new Map();
+const commandHistory = new Map();
+let commandSequence = 1;
+const clipComments = new Map();
+let clipCommentSequence = 1;
+const lastClipBySender = new Map();
+const MIN_CLIP_GAP_MS = 5000;
 
 if (!fs.existsSync(clipsDir)) {
   fs.mkdirSync(clipsDir, { recursive: true });
@@ -54,9 +67,220 @@ const buildClipInfo = (filename, stats) => {
   };
 };
 
+const parseCookies = (cookieHeader) => {
+  if (!cookieHeader) {
+    return {};
+  }
+  return cookieHeader.split(";").reduce((acc, part) => {
+    const [rawKey, ...rest] = part.split("=");
+    const key = rawKey ? rawKey.trim() : "";
+    if (!key) {
+      return acc;
+    }
+    acc[key] = decodeURIComponent(rest.join("=").trim());
+    return acc;
+  }, {});
+};
+
+const getSession = (req) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const sessionId = cookies.session_id;
+  if (!sessionId) {
+    return null;
+  }
+  return sessions.get(sessionId) || null;
+};
+
+const createSessionId = () => {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return crypto.randomBytes(16).toString("hex");
+};
+
+const applyCors = (req, res) => {
+  const origin = req.headers.origin;
+  if (!origin) {
+    return;
+  }
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.setHeader("Vary", "Origin");
+};
+
+const readRequestBody = (req) => new Promise((resolve, reject) => {
+  const chunks = [];
+  req.on("data", (chunk) => chunks.push(chunk));
+  req.on("end", () => resolve(Buffer.concat(chunks).toString()));
+  req.on("error", reject);
+});
+
+const sendJson = (res, statusCode, payload, headers = {}) => {
+  res.writeHead(statusCode, {
+    "Content-Type": "application/json",
+    ...headers
+  });
+  res.end(JSON.stringify(payload));
+};
+
 const server = http.createServer((req, res) => {
   const urlPath = req.url === "/" ? "/index.html" : req.url;
   const safePath = urlPath.split("?")[0];
+
+  if (safePath.startsWith("/api/")) {
+    applyCors(req, res);
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+  }
+
+  if (safePath === "/api/login") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const username = typeof data.username === "string" ? data.username.trim() : "";
+        const password = typeof data.password === "string" ? data.password : "";
+        const account = USERS.get(username);
+        if (!account || account.password !== password) {
+          sendJson(res, 401, { error: "invalid-credentials" });
+          return;
+        }
+        const sessionId = createSessionId();
+        sessions.set(sessionId, { username, role: account.role });
+        const cookie = `session_id=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax`;
+        sendJson(res, 200, { username, role: account.role }, { "Set-Cookie": cookie });
+      })
+      .catch(() => sendJson(res, 500, { error: "login-failed" }));
+    return;
+  }
+
+  if (safePath === "/api/session") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSession(req);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    sendJson(res, 200, session);
+    return;
+  }
+
+  if (safePath === "/api/logout") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSession(req);
+    if (session) {
+      const cookies = parseCookies(req.headers.cookie);
+      const sessionId = cookies.session_id;
+      if (sessionId) {
+        sessions.delete(sessionId);
+      }
+    }
+    const cookie = "session_id=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
+    sendJson(res, 200, { ok: true }, { "Set-Cookie": cookie });
+    return;
+  }
+
+  if (safePath === "/api/clip-comments") {
+    const session = getSession(req);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const baseUrl = `http://${req.headers.host || "localhost"}`;
+    const requestUrl = new URL(req.url || "", baseUrl);
+    const clipId = (requestUrl.searchParams.get("clipId") || "").trim();
+    if (!clipId) {
+      sendJson(res, 400, { error: "missing-clip" });
+      return;
+    }
+    if (req.method === "GET") {
+      sendJson(res, 200, clipComments.get(clipId) || []);
+      return;
+    }
+    if (req.method === "DELETE") {
+      readRequestBody(req)
+        .then((body) => {
+          let data = null;
+          try {
+            data = JSON.parse(body || "{}");
+          } catch (error) {
+            sendJson(res, 400, { error: "invalid-json" });
+            return;
+          }
+          const id = typeof data.id === "string" ? data.id.trim() : "";
+          if (!id) {
+            sendJson(res, 400, { error: "missing-id" });
+            return;
+          }
+          const history = clipComments.get(clipId) || [];
+          const target = history.find((entry) => entry.id === id);
+          if (!target) {
+            sendJson(res, 404, { error: "not-found" });
+            return;
+          }
+          if (session.role !== "admin" && target.user !== session.username) {
+            sendJson(res, 403, { error: "forbidden" });
+            return;
+          }
+          const next = history.filter((entry) => entry.id !== id);
+          clipComments.set(clipId, next);
+          sendJson(res, 200, next);
+        })
+        .catch(() => sendJson(res, 500, { error: "failed" }));
+      return;
+    }
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const text = typeof data.text === "string" ? data.text.trim() : "";
+        if (!text) {
+          sendJson(res, 400, { error: "empty" });
+          return;
+        }
+        const entry = {
+          id: String(clipCommentSequence++),
+          user: session.username,
+          text,
+          timestamp: new Date().toISOString()
+        };
+        const history = clipComments.get(clipId) || [];
+        history.push(entry);
+        clipComments.set(clipId, history);
+        sendJson(res, 200, history);
+      })
+      .catch(() => sendJson(res, 500, { error: "failed" }));
+    return;
+  }
 
   if (safePath === "/api/fall-clips") {
     if (req.method === "GET") {
@@ -93,6 +317,25 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ error: "empty" }));
           return;
         }
+        const nowMs = Date.now();
+        const lastClip = lastClipBySender.get(senderId);
+        if (lastClip
+            && (lastClip.stamp === clipStamp
+              || nowMs - lastClip.savedAtMs < MIN_CLIP_GAP_MS)
+            && fs.existsSync(filePath)) {
+          const stats = fs.statSync(filePath);
+          lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(buildClipInfo(filename, stats)));
+          return;
+        }
+        if (fs.existsSync(filePath)) {
+          const stats = fs.statSync(filePath);
+          lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(buildClipInfo(filename, stats)));
+          return;
+        }
         fs.writeFile(filePath, buffer, (writeErr) => {
           if (writeErr) {
             res.writeHead(500, { "Content-Type": "application/json" });
@@ -100,6 +343,7 @@ const server = http.createServer((req, res) => {
             return;
           }
           const stats = fs.statSync(filePath);
+          lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(buildClipInfo(filename, stats)));
         });
@@ -153,6 +397,7 @@ const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, MediaStream }
 const iceServers = [{ urls: "stun:stun.l.google.com:19302" }];
 const rtcConfig = { iceServers, sdpSemantics: "unified-plan" };
 const MAX_SENDERS = 4;
+const COMMAND_TOKEN = (process.env.COMMAND_TOKEN || "").trim();
 const MIN_POSE_LANDMARKS = 31;
 const CROUCH_KNEE_ANGLE_THRESHOLD = 95;
 const CROUCH_KNEE_ANGLE_SOFT = 108;
@@ -163,22 +408,22 @@ const CROUCH_HIP_HEEL_THRESHOLD = 0.18;
 const CROUCH_HIP_HEEL_X_THRESHOLD = 0.08;
 const CROUCH_MIN_CONFIDENCE = 0.6;
 const WALKING_SPEED_THRESHOLD = 0.08;
-const FALL_UPRIGHT_FRAMES = 10;
-const FALL_IMPULSE_FRAMES = 12;
-const FALL_POST_FRAMES = 18;
-const FALL_POST_STILL_FRAMES = 12;
-const FALL_POST_TIMEOUT_FRAMES = 30;
-const FALL_RECOVERY_FRAMES = 15;
-const FALL_HIP_DROP_THRESHOLD = 0.16;
-const FALL_DOWN_SPEED_THRESHOLD = 0.8;
-const FALL_STILL_SPEED_THRESHOLD = 0.25;
+const FALL_UPRIGHT_FRAMES = 12;
+const FALL_IMPULSE_FRAMES = 14;
+const FALL_POST_FRAMES = 24;
+const FALL_POST_STILL_FRAMES = 16;
+const FALL_POST_TIMEOUT_FRAMES = 36;
+const FALL_RECOVERY_FRAMES = 18;
+const FALL_HIP_DROP_THRESHOLD = 0.2;
+const FALL_DOWN_SPEED_THRESHOLD = 1.0;
+const FALL_STILL_SPEED_THRESHOLD = 0.2;
 const FALL_MIN_BBOX_HEIGHT = 0.15;
-const FALL_ANGLE_CHANGE_THRESHOLD = 40;
-const FALL_ASPECT_CHANGE_THRESHOLD = 0.45;
-const FALL_UPRIGHT_ANGLE = 25;
-const FALL_LYING_ANGLE = 60;
-const FALL_UPRIGHT_ASPECT = 1.35;
-const FALL_LYING_ASPECT = 1.1;
+const FALL_ANGLE_CHANGE_THRESHOLD = 50;
+const FALL_ASPECT_CHANGE_THRESHOLD = 0.55;
+const FALL_UPRIGHT_ANGLE = 22;
+const FALL_LYING_ANGLE = 65;
+const FALL_UPRIGHT_ASPECT = 1.4;
+const FALL_LYING_ASPECT = 1.05;
 
 const getLandmark = (landmarks, index) => {
   if (!Array.isArray(landmarks) || index < 0 || index >= landmarks.length) {
@@ -513,6 +758,43 @@ const senders = new Map();
 const viewers = new Map();
 let viewerIdCounter = 1;
 
+const broadcastToViewers = (payload) => {
+  for (const viewer of viewers.values()) {
+    try {
+      viewer.socket.send(payload);
+    } catch (error) {
+      // ignore
+    }
+  }
+};
+
+const sendHistoryToViewer = (viewerSocket) => {
+  for (const [senderId, entries] of commandHistory.entries()) {
+    try {
+      viewerSocket.send(JSON.stringify({
+        type: "command-history",
+        senderId,
+        entries
+      }));
+    } catch (error) {
+      // ignore
+    }
+  }
+};
+
+const sendHistoryToSender = (senderId, senderSocket) => {
+  const entries = commandHistory.get(senderId) || [];
+  try {
+    senderSocket.send(JSON.stringify({
+      type: "command-history",
+      senderId,
+      entries
+    }));
+  } catch (error) {
+    // ignore
+  }
+};
+
 const broadcastViewerCount = () => {
   const payload = JSON.stringify({ type: "viewer-count", count: viewers.size });
   for (const viewer of viewers.values()) {
@@ -628,6 +910,12 @@ const closeSender = (senderId) => {
     sender.pc.close();
   }
   senders.delete(senderId);
+  commandHistory.delete(senderId);
+  broadcastToViewers(JSON.stringify({
+    type: "command-history",
+    senderId,
+    entries: []
+  }));
 
   for (const viewer of viewers.values()) {
     const pc = viewer.pcs.get(senderId);
@@ -649,6 +937,7 @@ const closeSender = (senderId) => {
 };
 
 wss.on("connection", (socket, req) => {
+  socket.user = getSession({ headers: req.headers });
   const requestUrl = req.url || "";
   const isSender = requestUrl.includes("sender");
   const isViewer = requestUrl.includes("viewer");
@@ -686,6 +975,7 @@ wss.on("connection", (socket, req) => {
       fallState: "IDLE"
     });
     createSenderPeer(senderId);
+    sendHistoryToSender(senderId, socket);
   }
 
   if (isViewer) {
@@ -694,6 +984,7 @@ wss.on("connection", (socket, req) => {
     viewers.set(viewerId, { socket, pcs: new Map(), tracks: new Map() });
     socket.send(JSON.stringify({ type: "viewer-id", viewerId }));
     broadcastViewerCount();
+    sendHistoryToViewer(socket);
     for (const senderId of senders.keys()) {
       void ensureViewerPeer(viewerId, senderId);
     }
@@ -754,6 +1045,87 @@ wss.on("connection", (socket, req) => {
     const viewerId = socket.viewerId;
     const senderId = message.senderId || (senders.size === 1 ? Array.from(senders.keys())[0] : null);
     if (!viewerId || !senderId) {
+      return;
+    }
+
+    if (message.type === "command") {
+      const session = socket.user;
+      if (!session) {
+        return;
+      }
+      const text = typeof message.text === "string" ? message.text.trim() : "";
+      if (!text) {
+        return;
+      }
+      const sender = senders.get(senderId);
+      if (!sender || !sender.socket) {
+        return;
+      }
+      const entry = {
+        id: String(commandSequence++),
+        user: session.username,
+        text,
+        timestamp: new Date().toISOString()
+      };
+      const history = commandHistory.get(senderId) || [];
+      history.push(entry);
+      commandHistory.set(senderId, history);
+      const entryPayload = JSON.stringify({
+        type: "command-entry",
+        senderId,
+        entry
+      });
+      broadcastToViewers(entryPayload);
+      try {
+        sender.socket.send(entryPayload);
+      } catch (error) {
+        // ignore
+      }
+      try {
+        sender.socket.send(JSON.stringify({
+          type: "command",
+          senderId,
+          text
+        }));
+      } catch (error) {
+        // ignore
+      }
+      return;
+    }
+
+    if (message.type === "delete-command") {
+      const session = socket.user;
+      if (!session) {
+        return;
+      }
+      const id = typeof message.id === "string" ? message.id.trim() : "";
+      if (!id) {
+        return;
+      }
+      const history = commandHistory.get(senderId) || [];
+      const target = history.find((entry) => entry.id === id);
+      if (!target) {
+        return;
+      }
+      if (session && session.role !== "admin" && target.user !== session.username) {
+        return;
+      }
+      const next = history.filter((entry) => entry.id !== id);
+      commandHistory.set(senderId, next);
+      const historyPayload = JSON.stringify({
+        type: "command-history",
+        senderId,
+        entries: next
+      });
+      broadcastToViewers(historyPayload);
+      const sender = senders.get(senderId);
+      if (sender && sender.socket) {
+        try {
+          sender.socket.send(historyPayload);
+        } catch (error) {
+          // ignore
+        }
+      }
       return;
     }
     const viewer = viewers.get(viewerId);

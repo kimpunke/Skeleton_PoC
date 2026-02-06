@@ -1,7 +1,12 @@
 const MAX_SENDERS = 4;
-const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-const wsPort = location.port || "3000";
-const wsUrl = `${wsProtocol}://${location.hostname}:${wsPort}/ws?viewer`;
+const apiHost = location.hostname || "localhost";
+const apiPort = location.port || "3000";
+const apiProtocol = location.protocol === "https:" ? "https:" : "http:";
+const apiBase = location.protocol === "file:"
+  ? "http://localhost:3000"
+  : `${apiProtocol}//${apiHost}:${apiPort}`;
+const wsProtocol = apiProtocol === "https:" ? "wss" : "ws";
+const wsUrl = `${wsProtocol}://${apiHost}:${apiPort}/ws?viewer`;
 const ws = new WebSocket(wsUrl);
 const viewerCountEl = document.getElementById("viewerCount");
 const headerHostEl = document.getElementById("headerHost");
@@ -13,12 +18,32 @@ const fallAlertCloseEl = document.getElementById("fallAlertClose");
 const exceptionViewEl = document.getElementById("exceptionView");
 const exceptionListEl = document.getElementById("exceptionList");
 const exceptionPlayerEl = document.getElementById("exceptionPlayer");
-const FALL_PREBUFFER_MS = 10000;
+const loginOverlayEl = document.getElementById("loginOverlay");
+const authFormEl = document.getElementById("authForm");
+const authUsernameEl = document.getElementById("authUsername");
+const authPasswordEl = document.getElementById("authPassword");
+const togglePasswordEl = document.getElementById("togglePassword");
+const authErrorEl = document.getElementById("authError");
+const commandUserEl = document.getElementById("commandUser");
+const footerEl = document.getElementById("footer");
+const footerUserEl = document.getElementById("footerUser");
+const logoutButtonEl = document.getElementById("logoutButton");
+const commandFormEl = document.getElementById("commandForm");
+const commandInputEl = document.getElementById("commandInput");
+const commandHistoryEl = document.getElementById("commandHistory");
+const exceptionCommentListEl = document.getElementById("exceptionCommentList");
+const exceptionCommentFormEl = document.getElementById("exceptionCommentForm");
+const exceptionCommentInputEl = document.getElementById("exceptionCommentInput");
+const FALL_PREBUFFER_MS = 30000;
 const slots = new Map();
 const peerConnections = new Map();
 let focusedSenderId = null;
 let currentMode = "live";
 const dismissedFallAlerts = new Set();
+const commandHistoryBySender = new Map();
+let currentUser = null;
+const clipCommentsById = new Map();
+let currentClipId = null;
 
 const showFallAlert = (senderId) => {
   if (!fallAlertEl) {
@@ -37,6 +62,227 @@ const hideFallAlert = () => {
   }
   fallAlertEl.classList.remove("visible");
   delete fallAlertEl.dataset.senderId;
+};
+
+const renderCommandHistory = (senderId) => {
+  if (!commandHistoryEl) {
+    return;
+  }
+  commandHistoryEl.innerHTML = "";
+  const history = senderId ? commandHistoryBySender.get(senderId) : null;
+  if (!history || history.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "commandHistoryEmpty";
+    empty.textContent = "No commands";
+    commandHistoryEl.appendChild(empty);
+    return;
+  }
+  for (const entry of history) {
+    const item = document.createElement("div");
+    item.className = "commandHistoryItem";
+    const text = document.createElement("div");
+    text.className = "commandHistoryText";
+    text.textContent = `${entry.user}: ${entry.text}`;
+    item.appendChild(text);
+    if (currentUser && (currentUser.role === "admin" || entry.user === currentUser.username)) {
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "commandDelete";
+      deleteButton.textContent = "Delete";
+      deleteButton.dataset.id = entry.id;
+      deleteButton.dataset.user = entry.user || "";
+      item.appendChild(deleteButton);
+    }
+    commandHistoryEl.appendChild(item);
+  }
+  commandHistoryEl.scrollTop = commandHistoryEl.scrollHeight;
+};
+
+const recordCommand = (senderId, entry) => {
+  if (!senderId) {
+    return;
+  }
+  const history = commandHistoryBySender.get(senderId) || [];
+  history.push(entry);
+  commandHistoryBySender.set(senderId, history);
+  renderCommandHistory(senderId);
+};
+
+const setCommandHistory = (senderId, entries) => {
+  if (!senderId) {
+    return;
+  }
+  commandHistoryBySender.set(senderId, entries || []);
+  if (focusedSenderId === senderId) {
+    renderCommandHistory(senderId);
+  }
+};
+
+const updateAuthUi = () => {
+  const loggedIn = Boolean(currentUser);
+  if (loginOverlayEl) {
+    loginOverlayEl.style.display = loggedIn ? "none" : "flex";
+  }
+  if (commandFormEl) {
+    commandFormEl.style.display = loggedIn ? "flex" : "none";
+  }
+  if (commandUserEl) {
+    commandUserEl.textContent = loggedIn
+      ? `User: ${currentUser.username}`
+      : "Login required";
+  }
+  if (footerEl) {
+    footerEl.style.display = loggedIn ? "inline-flex" : "none";
+  }
+  if (footerUserEl) {
+    footerUserEl.textContent = loggedIn
+      ? `${currentUser.username} (${currentUser.role})`
+      : "";
+  }
+  if (exceptionCommentFormEl) {
+    exceptionCommentFormEl.style.display = loggedIn ? "flex" : "none";
+  }
+  renderCommandHistory(loggedIn ? focusedSenderId : null);
+  renderClipComments(currentClipId, loggedIn ? clipCommentsById.get(currentClipId) : null);
+};
+
+const loadSession = async () => {
+  try {
+    const response = await fetch(`${apiBase}/api/session`, { credentials: "include" });
+    if (!response.ok) {
+      currentUser = null;
+      updateAuthUi();
+      return;
+    }
+    currentUser = await response.json();
+    updateAuthUi();
+  } catch (error) {
+    currentUser = null;
+    updateAuthUi();
+  }
+};
+
+const renderClipComments = (clipId, comments) => {
+  if (!exceptionCommentListEl) {
+    return;
+  }
+  exceptionCommentListEl.innerHTML = "";
+  if (!clipId) {
+    const empty = document.createElement("div");
+    empty.className = "exceptionCommentEmpty";
+    empty.textContent = "Select a clip";
+    exceptionCommentListEl.appendChild(empty);
+    return;
+  }
+  if (!currentUser) {
+    const empty = document.createElement("div");
+    empty.className = "exceptionCommentEmpty";
+    empty.textContent = "Login required";
+    exceptionCommentListEl.appendChild(empty);
+    return;
+  }
+  const list = comments || [];
+  if (list.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "exceptionCommentEmpty";
+    empty.textContent = "No comments";
+    exceptionCommentListEl.appendChild(empty);
+    return;
+  }
+  for (const entry of list) {
+    const item = document.createElement("div");
+    item.className = "exceptionCommentItem";
+    const text = document.createElement("div");
+    text.className = "exceptionCommentText";
+    text.textContent = `${entry.user}: ${entry.text}`;
+    item.appendChild(text);
+    if (currentUser && (currentUser.role === "admin" || entry.user === currentUser.username)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "exceptionCommentDelete";
+      button.textContent = "Delete";
+      button.dataset.id = entry.id;
+      button.dataset.user = entry.user || "";
+      item.appendChild(button);
+    }
+    exceptionCommentListEl.appendChild(item);
+  }
+  exceptionCommentListEl.scrollTop = exceptionCommentListEl.scrollHeight;
+};
+
+const loadClipComments = async (clipId) => {
+  if (!clipId || !currentUser) {
+    renderClipComments(clipId, null);
+    return;
+  }
+  try {
+    const response = await fetch(`${apiBase}/api/clip-comments?clipId=${encodeURIComponent(clipId)}`,
+      { credentials: "include" }
+    );
+    if (!response.ok) {
+      renderClipComments(clipId, null);
+      return;
+    }
+    const comments = await response.json();
+    clipCommentsById.set(clipId, comments);
+    renderClipComments(clipId, comments);
+  } catch (error) {
+    renderClipComments(clipId, null);
+  }
+};
+
+const selectClip = (clip) => {
+  currentClipId = clip ? clip.id : null;
+  const cached = currentClipId ? clipCommentsById.get(currentClipId) : null;
+  renderClipComments(currentClipId, cached);
+  if (currentClipId) {
+    void loadClipComments(currentClipId);
+  }
+};
+
+const submitClipComment = async () => {
+  if (!currentUser || !currentClipId || !exceptionCommentInputEl) {
+    return;
+  }
+  const text = exceptionCommentInputEl.value.trim();
+  if (!text) {
+    return;
+  }
+  try {
+    const response = await fetch(`${apiBase}/api/clip-comments?clipId=${encodeURIComponent(currentClipId)}`,
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      }
+    );
+    if (!response.ok) {
+      return;
+    }
+    const comments = await response.json();
+    clipCommentsById.set(currentClipId, comments);
+    renderClipComments(currentClipId, comments);
+    exceptionCommentInputEl.value = "";
+  } catch (error) {
+    // ignore
+  }
+};
+
+const sendCommand = () => {
+  if (!commandInputEl || !focusedSenderId || !currentUser) {
+    return;
+  }
+  const text = commandInputEl.value.trim();
+  if (!text) {
+    return;
+  }
+  ws.send(JSON.stringify({
+    type: "command",
+    senderId: focusedSenderId,
+    text
+  }));
+  commandInputEl.value = "";
 };
 
 const showOffline = (senderId) => {
@@ -281,7 +527,7 @@ const finalizeFallClipData = (chunks, senderId, fallStartedAt) => {
 
 const uploadFallClip = async (blob, senderId, timestamp) => {
   try {
-    const response = await fetch("/api/fall-clips", {
+    const response = await fetch(`${apiBase}/api/fall-clips`, {
       method: "POST",
       headers: {
         "Content-Type": "application/octet-stream",
@@ -315,15 +561,19 @@ const loadFallClips = async () => {
     return;
   }
   exceptionListEl.innerHTML = "";
+  currentClipId = null;
+  renderClipComments(null, null);
   try {
-    const response = await fetch("/api/fall-clips");
+    const response = await fetch(`${apiBase}/api/fall-clips`);
     if (!response.ok) {
       exceptionListEl.textContent = "No fall clips";
+      renderClipComments(null, null);
       return;
     }
     const clips = await response.json();
     if (!Array.isArray(clips) || clips.length === 0) {
       exceptionListEl.textContent = "No fall clips";
+      renderClipComments(null, null);
       return;
     }
     for (const clip of clips) {
@@ -339,11 +589,13 @@ const loadFallClips = async () => {
         for (const button of exceptionListEl.querySelectorAll(".exceptionItem")) {
           button.classList.toggle("active", button === item);
         }
+        selectClip(clip);
       });
       exceptionListEl.appendChild(item);
     }
   } catch (error) {
     exceptionListEl.textContent = "No fall clips";
+    renderClipComments(null, null);
   }
 };
 
@@ -351,6 +603,7 @@ const clearFocus = () => {
   if (!gridEl) {
     return;
   }
+  document.body.classList.remove("focused");
   focusedSenderId = null;
   gridEl.classList.remove("focused");
   for (const slot of slots.values()) {
@@ -361,6 +614,10 @@ const clearFocus = () => {
   if (backButton) {
     backButton.classList.remove("visible");
   }
+  if (commandInputEl) {
+    commandInputEl.value = "";
+  }
+  renderCommandHistory(null);
 };
 
 const focusSender = (senderId) => {
@@ -371,6 +628,7 @@ const focusSender = (senderId) => {
   if (!slot || !slot.frame) {
     return;
   }
+  document.body.classList.add("focused");
   focusedSenderId = senderId;
   gridEl.classList.add("focused");
   for (const [id, entry] of slots.entries()) {
@@ -380,6 +638,12 @@ const focusSender = (senderId) => {
   }
   if (backButton) {
     backButton.classList.add("visible");
+  }
+  if (commandInputEl) {
+    commandInputEl.focus();
+  }
+  if (currentUser) {
+    renderCommandHistory(senderId);
   }
 };
 
@@ -455,6 +719,152 @@ if (backButton) {
   });
 }
 
+if (commandFormEl) {
+  commandFormEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendCommand();
+  });
+}
+
+if (exceptionCommentFormEl) {
+  exceptionCommentFormEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void submitClipComment();
+  });
+}
+
+if (exceptionCommentListEl) {
+  exceptionCommentListEl.addEventListener("click", async (event) => {
+    if (!currentUser || !currentClipId) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const button = target.closest(".exceptionCommentDelete");
+    if (!button) {
+      return;
+    }
+    const id = button.dataset.id;
+    const owner = button.dataset.user || "";
+    if (!id) {
+      return;
+    }
+    if (currentUser.role !== "admin" && owner !== currentUser.username) {
+      return;
+    }
+    try {
+      const response = await fetch(`${apiBase}/api/clip-comments?clipId=${encodeURIComponent(currentClipId)}`,
+        {
+          method: "DELETE",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id })
+        }
+      );
+      if (!response.ok) {
+        return;
+      }
+      const comments = await response.json();
+      clipCommentsById.set(currentClipId, comments);
+      renderClipComments(currentClipId, comments);
+    } catch (error) {
+      // ignore
+    }
+  });
+}
+
+if (authFormEl) {
+  authFormEl.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (authErrorEl) {
+      authErrorEl.textContent = "";
+    }
+    const username = authUsernameEl ? authUsernameEl.value.trim() : "";
+    const password = authPasswordEl ? authPasswordEl.value : "";
+    if (!username || !password) {
+      if (authErrorEl) {
+        authErrorEl.textContent = "Enter username and password";
+      }
+      return;
+    }
+    try {
+      const response = await fetch(`${apiBase}/api/login`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password })
+      });
+      if (!response.ok) {
+        if (authErrorEl) {
+          authErrorEl.textContent = "Login failed";
+        }
+        return;
+      }
+      location.reload();
+    } catch (error) {
+      if (authErrorEl) {
+        authErrorEl.textContent = "Login failed";
+      }
+    }
+  });
+}
+
+if (togglePasswordEl && authPasswordEl) {
+  togglePasswordEl.addEventListener("click", () => {
+    const isPassword = authPasswordEl.type === "password";
+    authPasswordEl.type = isPassword ? "text" : "password";
+    togglePasswordEl.textContent = isPassword ? "Hide" : "Show";
+  });
+}
+
+if (logoutButtonEl) {
+  logoutButtonEl.addEventListener("click", async () => {
+    try {
+      await fetch(`${apiBase}/api/logout`, {
+        method: "POST",
+        credentials: "include"
+      });
+    } catch (error) {
+      // ignore
+    }
+    location.reload();
+  });
+}
+
+if (commandHistoryEl) {
+  commandHistoryEl.addEventListener("click", (event) => {
+    if (!currentUser) {
+      return;
+    }
+    if (!focusedSenderId) {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const button = target.closest(".commandDelete");
+    if (!button) {
+      return;
+    }
+    const id = button.dataset.id;
+    const owner = button.dataset.user || "";
+    if (!id) {
+      return;
+    }
+    if (currentUser.role !== "admin" && owner !== currentUser.username) {
+      return;
+    }
+    ws.send(JSON.stringify({
+      type: "delete-command",
+      senderId: focusedSenderId,
+      id
+    }));
+  });
+}
+
 ws.onmessage = async (event) => {
   const message = JSON.parse(event.data);
   if (message.type === "viewer-id") {
@@ -499,6 +909,18 @@ ws.onmessage = async (event) => {
     }
     return;
   }
+  if (message.type === "command-entry") {
+    if (message.senderId && message.entry) {
+      recordCommand(message.senderId, message.entry);
+    }
+    return;
+  }
+  if (message.type === "command-history") {
+    if (message.senderId) {
+      setCommandHistory(message.senderId, message.entries || []);
+    }
+    return;
+  }
   if (message.type === "offer") {
     const senderId = message.senderId;
     const pc = ensurePeerConnection(senderId);
@@ -534,6 +956,7 @@ ws.onmessage = async (event) => {
       pc.close();
       peerConnections.delete(senderId);
     }
+    commandHistoryBySender.delete(senderId);
     showOffline(senderId);
     clearStream(senderId);
     const slot = slots.get(senderId);
@@ -579,3 +1002,4 @@ ws.onerror = () => {
 };
 
 initHeader();
+loadSession();

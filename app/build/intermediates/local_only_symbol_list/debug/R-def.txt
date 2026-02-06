@@ -1,11 +1,16 @@
 R_DEF: Internal format may change without notice
 local
 color md_theme_primary
+id button_chat
 id button_switch_camera
 id button_switch_mode
+id command_history_container
+id command_history_scroll
+id command_history_title
 id overlay_view
 id preview_view
 id remote_view
+id text_command_history
 id text_mode
 id text_pose_class
 layout activity_main
