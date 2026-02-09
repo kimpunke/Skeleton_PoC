@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Login</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="loginPage">
+    <div class="loginPanel">
+      <div class="loginTitle">Login</div>
+      <form id="authForm" autocomplete="off">
+        <input
+          id="authUsername"
+          type="text"
+          placeholder="Username"
+          aria-label="Username"
+        />
+        <div class="passwordRow">
+          <input
+            id="authPassword"
+            type="password"
+            placeholder="Password"
+            aria-label="Password"
+          />
+          <button id="togglePassword" type="button">Show</button>
+        </div>
+        <button id="authSubmit" type="submit">Login</button>
+      </form>
+      <div id="authError" class="authError"></div>
+      <a class="loginBackLink" href="signup.html">Sign up</a>
+      <a class="loginBackLink" href="/">Back to viewer</a>
+    </div>
+    <script src="login.js"></script>
+  </body>
+</html>

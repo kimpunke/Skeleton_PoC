@@ -18,16 +18,14 @@ const fallAlertCloseEl = document.getElementById("fallAlertClose");
 const exceptionViewEl = document.getElementById("exceptionView");
 const exceptionListEl = document.getElementById("exceptionList");
 const exceptionPlayerEl = document.getElementById("exceptionPlayer");
-const loginOverlayEl = document.getElementById("loginOverlay");
-const authFormEl = document.getElementById("authForm");
-const authUsernameEl = document.getElementById("authUsername");
-const authPasswordEl = document.getElementById("authPassword");
-const togglePasswordEl = document.getElementById("togglePassword");
-const authErrorEl = document.getElementById("authError");
+const approvalViewEl = document.getElementById("approvalView");
+const approvalListEl = document.getElementById("approvalList");
 const commandUserEl = document.getElementById("commandUser");
-const footerEl = document.getElementById("footer");
-const footerUserEl = document.getElementById("footerUser");
-const logoutButtonEl = document.getElementById("logoutButton");
+const commandPanelEl = document.getElementById("commandPanel");
+const footerHostEl = document.getElementById("footerHost");
+let footerUserEl = null;
+let loginButtonEl = null;
+let logoutButtonEl = null;
 const commandFormEl = document.getElementById("commandForm");
 const commandInputEl = document.getElementById("commandInput");
 const commandHistoryEl = document.getElementById("commandHistory");
@@ -120,8 +118,23 @@ const setCommandHistory = (senderId, entries) => {
 
 const updateAuthUi = () => {
   const loggedIn = Boolean(currentUser);
-  if (loginOverlayEl) {
-    loginOverlayEl.style.display = loggedIn ? "none" : "flex";
+  const isAdmin = loggedIn && currentUser && currentUser.role === "admin";
+  if (!loggedIn && (currentMode === "exception" || currentMode === "approval")) {
+    setMode("live");
+  }
+  if (!isAdmin && currentMode === "approval") {
+    setMode("live");
+  }
+  if (commandPanelEl) {
+    commandPanelEl.style.display = loggedIn ? "" : "none";
+  }
+  const exceptionButton = document.getElementById("modeException");
+  if (exceptionButton) {
+    exceptionButton.style.display = loggedIn ? "" : "none";
+  }
+  const approvalButton = document.getElementById("modeApproval");
+  if (approvalButton) {
+    approvalButton.style.display = isAdmin ? "" : "none";
   }
   if (commandFormEl) {
     commandFormEl.style.display = loggedIn ? "flex" : "none";
@@ -131,13 +144,16 @@ const updateAuthUi = () => {
       ? `User: ${currentUser.username}`
       : "Login required";
   }
-  if (footerEl) {
-    footerEl.style.display = loggedIn ? "inline-flex" : "none";
-  }
   if (footerUserEl) {
     footerUserEl.textContent = loggedIn
       ? `${currentUser.username} (${currentUser.role})`
       : "";
+  }
+  if (loginButtonEl) {
+    loginButtonEl.style.display = loggedIn ? "none" : "inline-flex";
+  }
+  if (logoutButtonEl) {
+    logoutButtonEl.style.display = loggedIn ? "inline-flex" : "none";
   }
   if (exceptionCommentFormEl) {
     exceptionCommentFormEl.style.display = loggedIn ? "flex" : "none";
@@ -159,6 +175,115 @@ const loadSession = async () => {
   } catch (error) {
     currentUser = null;
     updateAuthUi();
+  }
+};
+
+const formatApprovalTimestamp = (value) => {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) {
+    return value || "";
+  }
+  return date.toLocaleString();
+};
+
+const renderSignupRequests = (requests) => {
+  if (!approvalListEl) {
+    return;
+  }
+  approvalListEl.innerHTML = "";
+
+  if (!currentUser) {
+    const empty = document.createElement("div");
+    empty.className = "approvalReason";
+    empty.textContent = "Login required";
+    approvalListEl.appendChild(empty);
+    return;
+  }
+  if (currentUser.role !== "admin") {
+    const empty = document.createElement("div");
+    empty.className = "approvalReason";
+    empty.textContent = "Admin only";
+    approvalListEl.appendChild(empty);
+    return;
+  }
+
+  if (!Array.isArray(requests) || requests.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "approvalReason";
+    empty.textContent = "No signup requests";
+    approvalListEl.appendChild(empty);
+    return;
+  }
+
+  for (const request of requests) {
+    const item = document.createElement("div");
+    item.className = "approvalItem";
+
+    const meta = document.createElement("div");
+    meta.className = "approvalMeta";
+
+    const username = document.createElement("div");
+    username.className = "approvalUsername";
+    username.textContent = request.username || "";
+
+    const requestedAt = document.createElement("div");
+    requestedAt.className = "approvalRequestedAt";
+    requestedAt.textContent = formatApprovalTimestamp(request.requestedAt);
+
+    meta.appendChild(username);
+    meta.appendChild(requestedAt);
+
+    const reason = document.createElement("div");
+    reason.className = "approvalReason";
+    reason.textContent = request.reason || "";
+
+    const actions = document.createElement("div");
+    actions.className = "approvalActions";
+
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.className = "approvalApprove";
+    approve.textContent = "승인";
+    approve.dataset.action = "approve";
+    approve.dataset.id = request.id;
+
+    const reject = document.createElement("button");
+    reject.type = "button";
+    reject.className = "approvalReject";
+    reject.textContent = "거절";
+    reject.dataset.action = "reject";
+    reject.dataset.id = request.id;
+
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+
+    item.appendChild(meta);
+    item.appendChild(reason);
+    item.appendChild(actions);
+    approvalListEl.appendChild(item);
+  }
+};
+
+const loadSignupRequests = async () => {
+  if (!approvalListEl) {
+    return;
+  }
+  if (!currentUser || currentUser.role !== "admin") {
+    renderSignupRequests([]);
+    return;
+  }
+  try {
+    const response = await fetch(`${apiBase}/api/admin/signup-requests`, {
+      credentials: "include"
+    });
+    if (!response.ok) {
+      renderSignupRequests([]);
+      return;
+    }
+    const list = await response.json();
+    renderSignupRequests(list);
+  } catch (error) {
+    renderSignupRequests([]);
   }
 };
 
@@ -650,20 +775,31 @@ const focusSender = (senderId) => {
 const setMode = (mode) => {
   currentMode = mode;
   document.body.classList.toggle("mode-exception", mode === "exception");
+  document.body.classList.toggle("mode-approval", mode === "approval");
   if (mode === "exception") {
     clearFocus();
     if (exceptionPlayerEl) {
       exceptionPlayerEl.pause();
     }
     void loadFallClips();
+  } else if (mode === "approval") {
+    clearFocus();
+    if (exceptionPlayerEl) {
+      exceptionPlayerEl.pause();
+    }
+    void loadSignupRequests();
   }
   const liveButton = document.getElementById("modeLive");
   const exceptionButton = document.getElementById("modeException");
+  const approvalButton = document.getElementById("modeApproval");
   if (liveButton) {
     liveButton.classList.toggle("active", mode === "live");
   }
   if (exceptionButton) {
     exceptionButton.classList.toggle("active", mode === "exception");
+  }
+  if (approvalButton) {
+    approvalButton.classList.toggle("active", mode === "approval");
   }
 };
 
@@ -679,13 +815,58 @@ const initHeader = async () => {
     headerHostEl.innerHTML = await response.text();
     const liveButton = document.getElementById("modeLive");
     const exceptionButton = document.getElementById("modeException");
+    const approvalButton = document.getElementById("modeApproval");
     if (liveButton) {
       liveButton.addEventListener("click", () => setMode("live"));
     }
     if (exceptionButton) {
       exceptionButton.addEventListener("click", () => setMode("exception"));
     }
+    if (approvalButton) {
+      approvalButton.addEventListener("click", () => setMode("approval"));
+    }
     setMode("live");
+    updateAuthUi();
+  } catch (error) {
+    // ignore
+  }
+};
+
+const initFooter = async () => {
+  if (!footerHostEl) {
+    return;
+  }
+  try {
+    const response = await fetch("footer.html");
+    if (!response.ok) {
+      return;
+    }
+    footerHostEl.innerHTML = await response.text();
+    footerUserEl = document.getElementById("footerUser");
+    loginButtonEl = document.getElementById("loginButton");
+    logoutButtonEl = document.getElementById("logoutButton");
+
+    if (loginButtonEl) {
+      loginButtonEl.addEventListener("click", () => {
+        location.href = "login.html";
+      });
+    }
+
+    if (logoutButtonEl) {
+      logoutButtonEl.addEventListener("click", async () => {
+        try {
+          await fetch(`${apiBase}/api/logout`, {
+            method: "POST",
+            credentials: "include"
+          });
+        } catch (error) {
+          // ignore
+        }
+        location.reload();
+      });
+    }
+
+    updateAuthUi();
   } catch (error) {
     // ignore
   }
@@ -775,61 +956,41 @@ if (exceptionCommentListEl) {
   });
 }
 
-if (authFormEl) {
-  authFormEl.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (authErrorEl) {
-      authErrorEl.textContent = "";
-    }
-    const username = authUsernameEl ? authUsernameEl.value.trim() : "";
-    const password = authPasswordEl ? authPasswordEl.value : "";
-    if (!username || !password) {
-      if (authErrorEl) {
-        authErrorEl.textContent = "Enter username and password";
-      }
+if (approvalListEl) {
+  approvalListEl.addEventListener("click", async (event) => {
+    if (!currentUser || currentUser.role !== "admin") {
       return;
     }
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+    const button = target.closest("button[data-action]");
+    if (!button) {
+      return;
+    }
+    const action = button.dataset.action;
+    const id = button.dataset.id;
+    if (!id || (action !== "approve" && action !== "reject")) {
+      return;
+    }
+    const endpoint = action === "approve"
+      ? "/api/admin/signup-requests/approve"
+      : "/api/admin/signup-requests/reject";
     try {
-      const response = await fetch(`${apiBase}/api/login`, {
+      const response = await fetch(`${apiBase}${endpoint}`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password })
+        body: JSON.stringify({ id })
       });
       if (!response.ok) {
-        if (authErrorEl) {
-          authErrorEl.textContent = "Login failed";
-        }
         return;
       }
-      location.reload();
-    } catch (error) {
-      if (authErrorEl) {
-        authErrorEl.textContent = "Login failed";
-      }
-    }
-  });
-}
-
-if (togglePasswordEl && authPasswordEl) {
-  togglePasswordEl.addEventListener("click", () => {
-    const isPassword = authPasswordEl.type === "password";
-    authPasswordEl.type = isPassword ? "text" : "password";
-    togglePasswordEl.textContent = isPassword ? "Hide" : "Show";
-  });
-}
-
-if (logoutButtonEl) {
-  logoutButtonEl.addEventListener("click", async () => {
-    try {
-      await fetch(`${apiBase}/api/logout`, {
-        method: "POST",
-        credentials: "include"
-      });
+      await loadSignupRequests();
     } catch (error) {
       // ignore
     }
-    location.reload();
   });
 }
 
@@ -1002,4 +1163,6 @@ ws.onerror = () => {
 };
 
 initHeader();
+initFooter();
+updateAuthUi();
 loadSession();

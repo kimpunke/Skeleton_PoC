@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign up</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="loginPage">
+    <div class="loginPanel">
+      <div class="loginTitle">Sign up</div>
+      <div class="signupHint">Password: 8+ chars, 1 number, 1 special.</div>
+      <form id="signupForm" autocomplete="off">
+        <input
+          id="signupUsername"
+          type="text"
+          placeholder="Username"
+          aria-label="Username"
+        />
+        <div class="passwordRow">
+          <input
+            id="signupPassword"
+            type="password"
+            placeholder="Password"
+            aria-label="Password"
+          />
+          <button id="toggleSignupPassword" type="button">Show</button>
+        </div>
+        <input
+          id="signupPasswordConfirm"
+          type="password"
+          placeholder="Confirm password"
+          aria-label="Confirm password"
+        />
+        <textarea
+          id="signupReason"
+          placeholder="Reason for access"
+          aria-label="Reason for access"
+          rows="3"
+        ></textarea>
+        <button id="signupSubmit" type="submit">Request</button>
+      </form>
+      <div id="signupError" class="authError"></div>
+      <div id="signupSuccess" class="signupSuccess"></div>
+      <a class="loginBackLink" href="login.html">Back to login</a>
+      <a class="loginBackLink" href="/">Back to viewer</a>
+    </div>
+    <script src="signup.js"></script>
+  </body>
+</html>

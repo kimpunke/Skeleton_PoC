@@ -2,6 +2,7 @@ import http from "http";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import { DatabaseSync } from "node:sqlite";
 import { WebSocketServer } from "ws";
 import { fileURLToPath } from "url";
 import wrtc from "wrtc";
@@ -10,12 +11,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const publicDir = path.join(__dirname, "public");
 const clipsDir = path.join(__dirname, "clips");
-const USERS = new Map([
-  ["test1", { password: "test523320!", role: "user" }],
-  ["test2", { password: "test523320!", role: "user" }],
-  ["admin1", { password: "test523320!", role: "admin" }]
-]);
-const sessions = new Map();
+const dataDir = path.join(__dirname, "data");
+const dbPath = process.env.DB_PATH || path.join(dataDir, "app.db");
+const sessionTtlSeconds = Number(process.env.SESSION_TTL_SECONDS || 0);
 const commandHistory = new Map();
 let commandSequence = 1;
 const clipComments = new Map();
@@ -26,6 +24,152 @@ const MIN_CLIP_GAP_MS = 5000;
 if (!fs.existsSync(clipsDir)) {
   fs.mkdirSync(clipsDir, { recursive: true });
 }
+
+if (!fs.existsSync(path.dirname(dbPath))) {
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+}
+
+const db = new DatabaseSync(dbPath);
+db.exec("PRAGMA foreign_keys = ON;");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS signup_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    requested_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
+  CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
+  CREATE INDEX IF NOT EXISTS signup_requests_requested_at_idx ON signup_requests(requested_at);
+`);
+
+const normalizeRole = (role) => {
+  const value = typeof role === "string" ? role.trim().toLowerCase() : "";
+  if (value === "admin") {
+    return "admin";
+  }
+  return "user";
+};
+
+const hashPassword = (password) => {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(String(password), salt, 64);
+  return `scrypt:${salt.toString("base64")}:${hash.toString("base64")}`;
+};
+
+const verifyPassword = (password, storedHash) => {
+  if (typeof storedHash !== "string") {
+    return false;
+  }
+  const parts = storedHash.split(":");
+  if (parts.length !== 3 || parts[0] !== "scrypt") {
+    return false;
+  }
+  const salt = Buffer.from(parts[1], "base64");
+  const expected = Buffer.from(parts[2], "base64");
+  const actual = crypto.scryptSync(String(password), salt, expected.length);
+  if (actual.length !== expected.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(actual, expected);
+};
+
+const meetsPasswordPolicy = (password) => {
+  if (typeof password !== "string") {
+    return false;
+  }
+  if (password.length < 8) {
+    return false;
+  }
+  if (!/[0-9]/.test(password)) {
+    return false;
+  }
+  if (!/[^A-Za-z0-9\s]/.test(password)) {
+    return false;
+  }
+  return true;
+};
+
+const userCountStmt = db.prepare("SELECT COUNT(*) AS count FROM users");
+const insertSignupRequestStmt = db.prepare(
+  "INSERT INTO signup_requests(username, password_hash, reason, requested_at) VALUES(?, ?, ?, ?)"
+);
+const insertUserStmt = db.prepare(
+  "INSERT INTO users(username, password_hash, role, created_at) VALUES(?, ?, ?, ?)"
+);
+const findUserByUsernameStmt = db.prepare(
+  "SELECT id, username, password_hash, role FROM users WHERE username = ?"
+);
+const findSignupRequestByUsernameStmt = db.prepare(
+  "SELECT id FROM signup_requests WHERE username = ?"
+);
+const listSignupRequestsStmt = db.prepare(
+  "SELECT id, username, reason, requested_at FROM signup_requests ORDER BY requested_at DESC"
+);
+const findSignupRequestByIdStmt = db.prepare(
+  "SELECT id, username, password_hash, reason, requested_at FROM signup_requests WHERE id = ?"
+);
+const deleteSignupRequestByIdStmt = db.prepare(
+  "DELETE FROM signup_requests WHERE id = ?"
+);
+const insertSessionStmt = db.prepare(
+  "INSERT INTO sessions(id, user_id, created_at, expires_at) VALUES(?, ?, ?, ?)"
+);
+const findSessionStmt = db.prepare(
+  "SELECT users.username AS username, users.role AS role, sessions.expires_at AS expires_at"
+    + " FROM sessions JOIN users ON users.id = sessions.user_id"
+    + " WHERE sessions.id = ?"
+);
+const deleteSessionStmt = db.prepare("DELETE FROM sessions WHERE id = ?");
+const purgeExpiredSessionsStmt = db.prepare(
+  "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= ?"
+);
+
+const purgeExpiredSessions = () => {
+  if (!sessionTtlSeconds || Number.isNaN(sessionTtlSeconds) || sessionTtlSeconds <= 0) {
+    return;
+  }
+  purgeExpiredSessionsStmt.run(new Date().toISOString());
+};
+
+const ensureBootstrapUser = () => {
+  const row = userCountStmt.get();
+  const count = row ? Number(row.count) : 0;
+  if (count > 0) {
+    return;
+  }
+  const username = String(process.env.BOOTSTRAP_USERNAME || "").trim();
+  const password = String(process.env.BOOTSTRAP_PASSWORD || "");
+  const role = normalizeRole(process.env.BOOTSTRAP_ROLE || "admin");
+  if (!username || !password) {
+    console.error(
+      "No users found in DB. Set BOOTSTRAP_USERNAME and BOOTSTRAP_PASSWORD to create the first account."
+    );
+    return;
+  }
+  insertUserStmt.run(username, hashPassword(password), role, new Date().toISOString());
+  console.log(`Bootstrapped initial user '${username}' with role '${role}'.`);
+};
+
+ensureBootstrapUser();
 
 const formatClipStamp = (date) => {
   const pad2 = (value) => String(value).padStart(2, "0");
@@ -82,13 +226,25 @@ const parseCookies = (cookieHeader) => {
   }, {});
 };
 
-const getSession = (req) => {
-  const cookies = parseCookies(req.headers.cookie);
+const getSessionFromHeaders = (headers) => {
+  purgeExpiredSessions();
+  const cookies = parseCookies(headers && headers.cookie);
   const sessionId = cookies.session_id;
   if (!sessionId) {
     return null;
   }
-  return sessions.get(sessionId) || null;
+  const row = findSessionStmt.get(sessionId);
+  if (!row) {
+    return null;
+  }
+  if (row.expires_at) {
+    const expiresAt = new Date(row.expires_at);
+    if (Number.isNaN(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
+      deleteSessionStmt.run(sessionId);
+      return null;
+    }
+  }
+  return { username: row.username, role: row.role };
 };
 
 const createSessionId = () => {
@@ -138,6 +294,182 @@ const server = http.createServer((req, res) => {
     }
   }
 
+  if (safePath === "/api/signup") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+
+        const username = typeof data.username === "string" ? data.username.trim() : "";
+        const password = typeof data.password === "string" ? data.password : "";
+        const passwordConfirm = typeof data.passwordConfirm === "string" ? data.passwordConfirm : "";
+        const reason = typeof data.reason === "string" ? data.reason.trim() : "";
+        if (!username || !password || !passwordConfirm || !reason) {
+          sendJson(res, 400, { error: "missing-fields" });
+          return;
+        }
+        if (password !== passwordConfirm) {
+          sendJson(res, 400, { error: "password-mismatch" });
+          return;
+        }
+        if (!meetsPasswordPolicy(password)) {
+          sendJson(res, 400, { error: "weak-password" });
+          return;
+        }
+        if (findUserByUsernameStmt.get(username)) {
+          sendJson(res, 409, { error: "username-taken" });
+          return;
+        }
+        if (findSignupRequestByUsernameStmt.get(username)) {
+          sendJson(res, 409, { error: "username-pending" });
+          return;
+        }
+
+        try {
+          insertSignupRequestStmt.run(
+            username,
+            hashPassword(password),
+            reason,
+            new Date().toISOString()
+          );
+        } catch (error) {
+          sendJson(res, 500, { error: "signup-failed" });
+          return;
+        }
+        sendJson(res, 200, { ok: true });
+      })
+      .catch(() => sendJson(res, 500, { error: "signup-failed" }));
+    return;
+  }
+
+  if (safePath === "/api/admin/signup-requests") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    if (session.role !== "admin") {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const rows = listSignupRequestsStmt.all();
+    const result = rows.map((row) => ({
+      id: String(row.id),
+      username: row.username,
+      reason: row.reason,
+      requestedAt: row.requested_at
+    }));
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (safePath === "/api/admin/signup-requests/approve") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    if (session.role !== "admin") {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const rawId = data.id;
+        const id = typeof rawId === "number" ? rawId : Number(String(rawId || ""));
+        if (!Number.isFinite(id) || id <= 0) {
+          sendJson(res, 400, { error: "invalid-id" });
+          return;
+        }
+
+        const request = findSignupRequestByIdStmt.get(id);
+        if (!request) {
+          sendJson(res, 404, { error: "not-found" });
+          return;
+        }
+        try {
+          insertUserStmt.run(
+            request.username,
+            request.password_hash,
+            "user",
+            new Date().toISOString()
+          );
+        } catch (error) {
+          sendJson(res, 409, { error: "username-taken" });
+          return;
+        }
+        deleteSignupRequestByIdStmt.run(id);
+        sendJson(res, 200, { ok: true });
+      })
+      .catch(() => sendJson(res, 500, { error: "failed" }));
+    return;
+  }
+
+  if (safePath === "/api/admin/signup-requests/reject") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    if (session.role !== "admin") {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const rawId = data.id;
+        const id = typeof rawId === "number" ? rawId : Number(String(rawId || ""));
+        if (!Number.isFinite(id) || id <= 0) {
+          sendJson(res, 400, { error: "invalid-id" });
+          return;
+        }
+        const request = findSignupRequestByIdStmt.get(id);
+        if (!request) {
+          sendJson(res, 404, { error: "not-found" });
+          return;
+        }
+        deleteSignupRequestByIdStmt.run(id);
+        sendJson(res, 200, { ok: true });
+      })
+      .catch(() => sendJson(res, 500, { error: "failed" }));
+    return;
+  }
+
   if (safePath === "/api/login") {
     if (req.method !== "POST") {
       sendJson(res, 405, { error: "method-not-allowed" });
@@ -154,15 +486,28 @@ const server = http.createServer((req, res) => {
         }
         const username = typeof data.username === "string" ? data.username.trim() : "";
         const password = typeof data.password === "string" ? data.password : "";
-        const account = USERS.get(username);
-        if (!account || account.password !== password) {
+        const account = findUserByUsernameStmt.get(username);
+        if (!account) {
+          if (findSignupRequestByUsernameStmt.get(username)) {
+            sendJson(res, 403, { error: "pending-approval" });
+            return;
+          }
+          sendJson(res, 401, { error: "invalid-credentials" });
+          return;
+        }
+        if (!verifyPassword(password, account.password_hash)) {
           sendJson(res, 401, { error: "invalid-credentials" });
           return;
         }
         const sessionId = createSessionId();
-        sessions.set(sessionId, { username, role: account.role });
-        const cookie = `session_id=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax`;
-        sendJson(res, 200, { username, role: account.role }, { "Set-Cookie": cookie });
+        const createdAt = new Date().toISOString();
+        const expiresAt = (sessionTtlSeconds && sessionTtlSeconds > 0)
+          ? new Date(Date.now() + sessionTtlSeconds * 1000).toISOString()
+          : null;
+        insertSessionStmt.run(sessionId, account.id, createdAt, expiresAt);
+        const maxAge = expiresAt ? `; Max-Age=${Math.floor(sessionTtlSeconds)}` : "";
+        const cookie = `session_id=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax${maxAge}`;
+        sendJson(res, 200, { username: account.username, role: account.role }, { "Set-Cookie": cookie });
       })
       .catch(() => sendJson(res, 500, { error: "login-failed" }));
     return;
@@ -173,7 +518,7 @@ const server = http.createServer((req, res) => {
       sendJson(res, 405, { error: "method-not-allowed" });
       return;
     }
-    const session = getSession(req);
+    const session = getSessionFromHeaders(req.headers);
     if (!session) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
@@ -187,13 +532,10 @@ const server = http.createServer((req, res) => {
       sendJson(res, 405, { error: "method-not-allowed" });
       return;
     }
-    const session = getSession(req);
-    if (session) {
-      const cookies = parseCookies(req.headers.cookie);
-      const sessionId = cookies.session_id;
-      if (sessionId) {
-        sessions.delete(sessionId);
-      }
+    const cookies = parseCookies(req.headers.cookie);
+    const sessionId = cookies.session_id;
+    if (sessionId) {
+      deleteSessionStmt.run(sessionId);
     }
     const cookie = "session_id=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
     sendJson(res, 200, { ok: true }, { "Set-Cookie": cookie });
@@ -201,7 +543,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (safePath === "/api/clip-comments") {
-    const session = getSession(req);
+    const session = getSessionFromHeaders(req.headers);
     if (!session) {
       sendJson(res, 401, { error: "unauthorized" });
       return;
@@ -937,7 +1279,7 @@ const closeSender = (senderId) => {
 };
 
 wss.on("connection", (socket, req) => {
-  socket.user = getSession({ headers: req.headers });
+  socket.user = getSessionFromHeaders(req.headers);
   const requestUrl = req.url || "";
   const isSender = requestUrl.includes("sender");
   const isViewer = requestUrl.includes("viewer");
