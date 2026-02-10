@@ -1,6 +1,8 @@
 package com.example.mediapipepose;
 
 import android.content.Context;
+import android.net.Uri;
+import android.provider.Settings;
 import android.util.Log;
 import androidx.annotation.Nullable;
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark;
@@ -83,7 +85,7 @@ public class WebRtcStreamer {
         started = true;
         initializePeerConnectionFactory();
         createPeerConnection();
-        connectWebSocket(signalingUrl);
+        connectWebSocket(buildSignalingUrl(signalingUrl));
     }
 
     public void stop() {
@@ -233,6 +235,31 @@ public class WebRtcStreamer {
         OkHttpClient client = new OkHttpClient();
         Request request = new Request.Builder().url(url).build();
         webSocket = client.newWebSocket(request, new SignalingWebSocketListener());
+    }
+
+    private String buildSignalingUrl(String url) {
+        if (url == null || url.isEmpty()) {
+            return url;
+        }
+        String deviceId = Settings.Secure.getString(
+                context.getContentResolver(),
+                Settings.Secure.ANDROID_ID);
+        if (deviceId == null || deviceId.isEmpty()) {
+            return url;
+        }
+        Uri uri = Uri.parse(url);
+        String query = uri.getQuery();
+        if (query != null && (query.contains("deviceId=") || query.contains("device_id="))) {
+            return url;
+        }
+        String encodedDeviceId = Uri.encode(deviceId);
+        Uri.Builder builder = uri.buildUpon();
+        if (query == null || query.isEmpty()) {
+            builder.encodedQuery("deviceId=" + encodedDeviceId);
+        } else {
+            builder.encodedQuery(query + "&deviceId=" + encodedDeviceId);
+        }
+        return builder.build().toString();
     }
 
     private void sendMessage(JSONObject message) {

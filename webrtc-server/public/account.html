@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Account</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="loginPage">
+    <div class="loginPanel">
+      <div class="loginTitle">Account</div>
+      <div id="accountMeta" class="accountMeta"></div>
+
+      <div class="accountTabs" role="tablist" aria-label="Account sections">
+        <button id="tabGeneral" class="accountTab active" type="button" role="tab" aria-selected="true">General</button>
+        <button id="tabManage" class="accountTab" type="button" role="tab" aria-selected="false">Manage</button>
+      </div>
+
+      <div id="tabPanelGeneral" class="accountTabPanel" role="tabpanel">
+
+      <form id="accountForm" autocomplete="off">
+        <input
+          id="accountUsername"
+          class="accountReadonly"
+          type="text"
+          placeholder="Username"
+          aria-label="Username"
+          disabled
+          readonly
+        />
+        <input
+          id="accountNickname"
+          type="text"
+          placeholder="Chat nickname"
+          aria-label="Chat nickname"
+        />
+      </form>
+
+      <div class="loginTitle">Password</div>
+      <form id="passwordForm" autocomplete="off">
+        <div class="passwordRow">
+          <input
+            id="passwordCurrent"
+            type="password"
+            placeholder="Current password"
+            aria-label="Current password"
+          />
+          <button id="toggleCurrentPassword" type="button">Show</button>
+        </div>
+        <div class="passwordRow">
+          <input
+            id="passwordNew"
+            type="password"
+            placeholder="New password"
+            aria-label="New password"
+          />
+          <button id="toggleNewPassword" type="button">Show</button>
+        </div>
+        <div class="passwordRow">
+          <input
+            id="passwordNewConfirm"
+            type="password"
+            placeholder="Confirm new password"
+            aria-label="Confirm new password"
+          />
+          <button id="toggleNewPasswordConfirm" type="button">Show</button>
+        </div>
+        <button id="passwordSave" type="submit">Change password</button>
+      </form>
+
+      </div>
+
+      <div id="tabPanelManage" class="accountTabPanel" role="tabpanel" style="display:none">
+        <div class="loginTitle">계정 삭제</div>
+        <div class="accountDangerText">
+          이 작업은 되돌릴 수 없습니다. 계정이 영구적으로 삭제됩니다.
+        </div>
+        <label class="accountDangerCheck">
+          <input id="deleteConfirmCheck" type="checkbox" />
+          안내문을 읽고 이해했습니다
+        </label>
+        <div class="accountDangerHint">
+          안내문을 확인하신 뒤 아래 입력창에 "이해했습니다"를 입력해 주세요.
+        </div>
+        <input
+          id="deleteConfirmText"
+          type="text"
+          aria-label="Delete confirmation text"
+          autocomplete="off"
+        />
+        <button id="deleteAccountButton" class="accountDeleteButton" type="button" disabled>계정 삭제</button>
+      </div>
+
+      <div id="accountError" class="authError"></div>
+      <div id="accountSuccess" class="signupSuccess"></div>
+
+      <div class="accountFooterActions">
+        <button id="accountSave" type="submit" form="accountForm">Save</button>
+        <a id="backToViewer" class="loginBackLink" href="/">Back to viewer</a>
+      </div>
+    </div>
+
+    <div id="unsavedOverlay" class="loginOverlay">
+      <div class="loginPanel" role="dialog" aria-modal="true" aria-label="Unsaved changes">
+        <div class="loginTitle">저장되지 않은 변경사항</div>
+        <div class="accountMeta">변경사항이 있습니다. 저장하겠습니까?</div>
+        <div class="accountDialogActions">
+          <button id="unsavedYes" type="button">예</button>
+          <button id="unsavedNo" type="button">아니요</button>
+        </div>
+      </div>
+    </div>
+    <script src="account.js"></script>
+  </body>
+</html>

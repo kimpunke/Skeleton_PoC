@@ -11,8 +11,13 @@ const signupPasswordEl = document.getElementById("signupPassword");
 const signupPasswordConfirmEl = document.getElementById("signupPasswordConfirm");
 const signupReasonEl = document.getElementById("signupReason");
 const togglePasswordEl = document.getElementById("toggleSignupPassword");
+const toggleConfirmPasswordEl = document.getElementById("toggleSignupPasswordConfirm");
 const signupErrorEl = document.getElementById("signupError");
 const signupSuccessEl = document.getElementById("signupSuccess");
+const policyLengthEl = document.getElementById("policyLength");
+const policyNumberEl = document.getElementById("policyNumber");
+const policySpecialEl = document.getElementById("policySpecial");
+const policyMatchEl = document.getElementById("policyMatch");
 
 const setError = (text) => {
   if (signupErrorEl) {
@@ -26,20 +31,39 @@ const setSuccess = (text) => {
   }
 };
 
-const meetsPasswordPolicy = (password) => {
-  if (typeof password !== "string") {
-    return false;
+const hasMinPasswordLength = (password) => typeof password === "string" && password.length >= 8;
+const hasPasswordNumber = (password) => typeof password === "string" && /[0-9]/.test(password);
+const hasPasswordSpecial = (password) => typeof password === "string" && /[^A-Za-z0-9\s]/.test(password);
+const passwordMatchesConfirm = (password, confirm) => (
+  typeof password === "string"
+  && typeof confirm === "string"
+  && confirm.length > 0
+  && password === confirm
+);
+
+const meetsPasswordPolicy = (password) => (
+  hasMinPasswordLength(password)
+  && hasPasswordNumber(password)
+  && hasPasswordSpecial(password)
+);
+
+const updatePasswordPolicyUi = () => {
+  const password = signupPasswordEl ? signupPasswordEl.value : "";
+  const confirm = signupPasswordConfirmEl ? signupPasswordConfirmEl.value : "";
+  const items = [
+    { el: policyLengthEl, ok: hasMinPasswordLength(password), label: "8+ characters" },
+    { el: policyNumberEl, ok: hasPasswordNumber(password), label: "Includes a number" },
+    { el: policySpecialEl, ok: hasPasswordSpecial(password), label: "Includes a special character" },
+    { el: policyMatchEl, ok: passwordMatchesConfirm(password, confirm), label: "Confirm matches" }
+  ];
+  for (const item of items) {
+    if (!item.el) {
+      continue;
+    }
+    item.el.textContent = `${item.ok ? "[OK]" : "[ ]"} ${item.label}`;
+    item.el.classList.toggle("met", item.ok);
+    item.el.classList.toggle("unmet", !item.ok);
   }
-  if (password.length < 8) {
-    return false;
-  }
-  if (!/[0-9]/.test(password)) {
-    return false;
-  }
-  if (!/[^A-Za-z0-9\s]/.test(password)) {
-    return false;
-  }
-  return true;
 };
 
 if (togglePasswordEl && signupPasswordEl) {
@@ -48,6 +72,22 @@ if (togglePasswordEl && signupPasswordEl) {
     signupPasswordEl.type = isPassword ? "text" : "password";
     togglePasswordEl.textContent = isPassword ? "Hide" : "Show";
   });
+}
+
+if (toggleConfirmPasswordEl && signupPasswordConfirmEl) {
+  toggleConfirmPasswordEl.addEventListener("click", () => {
+    const isPassword = signupPasswordConfirmEl.type === "password";
+    signupPasswordConfirmEl.type = isPassword ? "text" : "password";
+    toggleConfirmPasswordEl.textContent = isPassword ? "Hide" : "Show";
+  });
+}
+
+if (signupPasswordEl) {
+  signupPasswordEl.addEventListener("input", updatePasswordPolicyUi);
+}
+
+if (signupPasswordConfirmEl) {
+  signupPasswordConfirmEl.addEventListener("input", updatePasswordPolicyUi);
 }
 
 if (signupFormEl) {
@@ -111,6 +151,7 @@ if (signupFormEl) {
       if (signupPasswordConfirmEl) {
         signupPasswordConfirmEl.value = "";
       }
+      updatePasswordPolicyUi();
     } catch (error) {
       setError("Signup failed");
     }
@@ -120,3 +161,5 @@ if (signupFormEl) {
 if (signupUsernameEl) {
   signupUsernameEl.focus();
 }
+
+updatePasswordPolicyUi();

@@ -15,9 +15,8 @@ const dataDir = path.join(__dirname, "data");
 const dbPath = process.env.DB_PATH || path.join(dataDir, "app.db");
 const sessionTtlSeconds = Number(process.env.SESSION_TTL_SECONDS || 0);
 const commandHistory = new Map();
-let commandSequence = 1;
-const clipComments = new Map();
-let clipCommentSequence = 1;
+const senderHistoryKeyById = new Map();
+// Clip comments are persisted in sqlite (see /api/clip-comments).
 const lastClipBySender = new Map();
 const MIN_CLIP_GAP_MS = 5000;
 
@@ -36,6 +35,7 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    nickname TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
@@ -56,15 +56,47 @@ db.exec(`
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS clip_comments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    clip_id TEXT NOT NULL,
+    user_username TEXT NOT NULL,
+    user_display TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS command_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id TEXT NOT NULL,
+    user_username TEXT NOT NULL,
+    user_display TEXT NOT NULL,
+    user_role TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+
   CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
   CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
   CREATE INDEX IF NOT EXISTS signup_requests_requested_at_idx ON signup_requests(requested_at);
+  CREATE INDEX IF NOT EXISTS clip_comments_clip_id_idx ON clip_comments(clip_id);
+  CREATE INDEX IF NOT EXISTS command_history_sender_id_idx ON command_history(sender_id);
 `);
+
+try {
+  db.exec("ALTER TABLE users ADD COLUMN nickname TEXT NOT NULL DEFAULT '';");
+} catch (error) {
+  // ignore (already exists)
+}
+
+db.exec("UPDATE users SET nickname = username WHERE nickname IS NULL OR nickname = '';");
 
 const normalizeRole = (role) => {
   const value = typeof role === "string" ? role.trim().toLowerCase() : "";
   if (value === "admin") {
     return "admin";
+  }
+  if (value === "manager") {
+    return "manager";
   }
   return "user";
 };
@@ -113,10 +145,10 @@ const insertSignupRequestStmt = db.prepare(
   "INSERT INTO signup_requests(username, password_hash, reason, requested_at) VALUES(?, ?, ?, ?)"
 );
 const insertUserStmt = db.prepare(
-  "INSERT INTO users(username, password_hash, role, created_at) VALUES(?, ?, ?, ?)"
+  "INSERT INTO users(username, password_hash, nickname, role, created_at) VALUES(?, ?, ?, ?, ?)"
 );
 const findUserByUsernameStmt = db.prepare(
-  "SELECT id, username, password_hash, role FROM users WHERE username = ?"
+  "SELECT id, username, password_hash, nickname, role FROM users WHERE username = ?"
 );
 const findSignupRequestByUsernameStmt = db.prepare(
   "SELECT id FROM signup_requests WHERE username = ?"
@@ -134,13 +166,64 @@ const insertSessionStmt = db.prepare(
   "INSERT INTO sessions(id, user_id, created_at, expires_at) VALUES(?, ?, ?, ?)"
 );
 const findSessionStmt = db.prepare(
-  "SELECT users.username AS username, users.role AS role, sessions.expires_at AS expires_at"
+  "SELECT users.username AS username, users.nickname AS nickname, users.role AS role, sessions.expires_at AS expires_at"
     + " FROM sessions JOIN users ON users.id = sessions.user_id"
     + " WHERE sessions.id = ?"
 );
 const deleteSessionStmt = db.prepare("DELETE FROM sessions WHERE id = ?");
 const purgeExpiredSessionsStmt = db.prepare(
   "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at <= ?"
+);
+const updateNicknameStmt = db.prepare(
+  "UPDATE users SET nickname = ? WHERE id = ?"
+);
+const updatePasswordHashStmt = db.prepare(
+  "UPDATE users SET password_hash = ? WHERE id = ?"
+);
+const listUsersStmt = db.prepare(
+  "SELECT id, username, nickname, role FROM users ORDER BY id DESC"
+);
+const updateUserRoleStmt = db.prepare(
+  "UPDATE users SET role = ? WHERE id = ?"
+);
+const findUserRoleByUsernameStmt = db.prepare(
+  "SELECT role FROM users WHERE username = ?"
+);
+const deleteUserByIdStmt = db.prepare(
+  "DELETE FROM users WHERE id = ?"
+);
+
+const listClipCommentsStmt = db.prepare(
+  "SELECT c.id AS id, c.user_username AS user_username, c.user_display AS user_display,"
+    + " c.text AS text, c.created_at AS created_at, u.role AS user_role"
+    + " FROM clip_comments c LEFT JOIN users u ON u.username = c.user_username"
+    + " WHERE c.clip_id = ? ORDER BY c.id ASC"
+);
+const insertClipCommentStmt = db.prepare(
+  "INSERT INTO clip_comments(clip_id, user_username, user_display, text, created_at) VALUES(?, ?, ?, ?, ?)"
+);
+const findClipCommentStmt = db.prepare(
+  "SELECT c.id AS id, c.user_username AS user_username, c.user_display AS user_display,"
+    + " c.text AS text, c.created_at AS created_at, u.role AS user_role"
+    + " FROM clip_comments c LEFT JOIN users u ON u.username = c.user_username"
+    + " WHERE c.id = ? AND c.clip_id = ?"
+);
+const deleteClipCommentStmt = db.prepare(
+  "DELETE FROM clip_comments WHERE id = ? AND clip_id = ?"
+);
+const deleteClipCommentsByClipIdStmt = db.prepare(
+  "DELETE FROM clip_comments WHERE clip_id = ?"
+);
+const listCommandHistoryStmt = db.prepare(
+  "SELECT id, sender_id, user_username, user_display, user_role, text, created_at"
+    + " FROM command_history WHERE sender_id = ? ORDER BY id ASC"
+);
+const insertCommandHistoryStmt = db.prepare(
+  "INSERT INTO command_history(sender_id, user_username, user_display, user_role, text, created_at)"
+    + " VALUES(?, ?, ?, ?, ?, ?)"
+);
+const deleteCommandHistoryStmt = db.prepare(
+  "DELETE FROM command_history WHERE id = ? AND sender_id = ?"
 );
 
 const purgeExpiredSessions = () => {
@@ -165,7 +248,13 @@ const ensureBootstrapUser = () => {
     );
     return;
   }
-  insertUserStmt.run(username, hashPassword(password), role, new Date().toISOString());
+  insertUserStmt.run(
+    username,
+    hashPassword(password),
+    username,
+    role,
+    new Date().toISOString()
+  );
   console.log(`Bootstrapped initial user '${username}' with role '${role}'.`);
 };
 
@@ -226,10 +315,8 @@ const parseCookies = (cookieHeader) => {
   }, {});
 };
 
-const getSessionFromHeaders = (headers) => {
+const getSessionById = (sessionId) => {
   purgeExpiredSessions();
-  const cookies = parseCookies(headers && headers.cookie);
-  const sessionId = cookies.session_id;
   if (!sessionId) {
     return null;
   }
@@ -244,7 +331,24 @@ const getSessionFromHeaders = (headers) => {
       return null;
     }
   }
-  return { username: row.username, role: row.role };
+  return {
+    sessionId,
+    username: row.username,
+    nickname: row.nickname || row.username,
+    role: row.role
+  };
+};
+
+const getSessionFromHeaders = (headers) => {
+  const headerSessionId = headers && typeof headers["x-session-id"] === "string"
+    ? headers["x-session-id"].trim()
+    : "";
+  if (headerSessionId) {
+    return getSessionById(headerSessionId);
+  }
+  const cookies = parseCookies(headers && headers.cookie);
+  const sessionId = cookies.session_id;
+  return getSessionById(sessionId);
 };
 
 const createSessionId = () => {
@@ -261,7 +365,7 @@ const applyCors = (req, res) => {
   }
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Session-Id");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
   res.setHeader("Vary", "Origin");
 };
@@ -351,6 +455,68 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (safePath === "/api/admin/users") {
+    if (req.method !== "GET") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    if (session.role !== "admin") {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    const rows = listUsersStmt.all();
+    const result = rows.map((row) => ({
+      id: String(row.id),
+      username: row.username,
+      nickname: row.nickname || row.username,
+      role: row.role
+    }));
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (safePath === "/api/admin/users/role") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    if (session.role !== "admin") {
+      sendJson(res, 403, { error: "forbidden" });
+      return;
+    }
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const rawId = data.id;
+        const id = typeof rawId === "number" ? rawId : Number(String(rawId || ""));
+        if (!Number.isFinite(id) || id <= 0) {
+          sendJson(res, 400, { error: "invalid-id" });
+          return;
+        }
+        const role = normalizeRole(data.role);
+        updateUserRoleStmt.run(role, id);
+        sendJson(res, 200, { ok: true });
+      })
+      .catch(() => sendJson(res, 500, { error: "failed" }));
+    return;
+  }
+
   if (safePath === "/api/admin/signup-requests") {
     if (req.method !== "GET") {
       sendJson(res, 405, { error: "method-not-allowed" });
@@ -415,6 +581,7 @@ const server = http.createServer((req, res) => {
           insertUserStmt.run(
             request.username,
             request.password_hash,
+            request.username,
             "user",
             new Date().toISOString()
           );
@@ -507,7 +674,17 @@ const server = http.createServer((req, res) => {
         insertSessionStmt.run(sessionId, account.id, createdAt, expiresAt);
         const maxAge = expiresAt ? `; Max-Age=${Math.floor(sessionTtlSeconds)}` : "";
         const cookie = `session_id=${encodeURIComponent(sessionId)}; Path=/; HttpOnly; SameSite=Lax${maxAge}`;
-        sendJson(res, 200, { username: account.username, role: account.role }, { "Set-Cookie": cookie });
+        sendJson(
+          res,
+          200,
+          {
+            sessionId,
+            username: account.username,
+            nickname: account.nickname || account.username,
+            role: account.role
+          },
+          { "Set-Cookie": cookie }
+        );
       })
       .catch(() => sendJson(res, 500, { error: "login-failed" }));
     return;
@@ -532,13 +709,154 @@ const server = http.createServer((req, res) => {
       sendJson(res, 405, { error: "method-not-allowed" });
       return;
     }
-    const cookies = parseCookies(req.headers.cookie);
-    const sessionId = cookies.session_id;
-    if (sessionId) {
-      deleteSessionStmt.run(sessionId);
+    const session = getSessionFromHeaders(req.headers);
+    if (session && session.sessionId) {
+      deleteSessionStmt.run(session.sessionId);
     }
     const cookie = "session_id=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
     sendJson(res, 200, { ok: true }, { "Set-Cookie": cookie });
+    return;
+  }
+
+  if (safePath === "/api/account") {
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const account = findUserByUsernameStmt.get(session.username);
+    if (!account) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+
+    if (req.method === "GET") {
+      sendJson(res, 200, {
+        username: account.username,
+        nickname: account.nickname || account.username,
+        role: account.role
+      });
+      return;
+    }
+
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const nickname = typeof data.nickname === "string" ? data.nickname.trim() : "";
+        if (!nickname) {
+          sendJson(res, 400, { error: "missing-nickname" });
+          return;
+        }
+        updateNicknameStmt.run(nickname, account.id);
+        sendJson(res, 200, { ok: true, nickname });
+      })
+      .catch(() => sendJson(res, 500, { error: "failed" }));
+    return;
+  }
+
+  if (safePath === "/api/account/password") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const account = findUserByUsernameStmt.get(session.username);
+    if (!account) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const currentPassword = typeof data.currentPassword === "string" ? data.currentPassword : "";
+        const newPassword = typeof data.newPassword === "string" ? data.newPassword : "";
+        const newPasswordConfirm = typeof data.newPasswordConfirm === "string" ? data.newPasswordConfirm : "";
+        if (!currentPassword || !newPassword || !newPasswordConfirm) {
+          sendJson(res, 400, { error: "missing-fields" });
+          return;
+        }
+        if (!verifyPassword(currentPassword, account.password_hash)) {
+          sendJson(res, 401, { error: "invalid-credentials" });
+          return;
+        }
+        if (newPassword !== newPasswordConfirm) {
+          sendJson(res, 400, { error: "password-mismatch" });
+          return;
+        }
+        if (!meetsPasswordPolicy(newPassword)) {
+          sendJson(res, 400, { error: "weak-password" });
+          return;
+        }
+
+        updatePasswordHashStmt.run(hashPassword(newPassword), account.id);
+        sendJson(res, 200, { ok: true });
+      })
+      .catch(() => sendJson(res, 500, { error: "failed" }));
+    return;
+  }
+
+  if (safePath === "/api/account/delete") {
+    if (req.method !== "POST") {
+      sendJson(res, 405, { error: "method-not-allowed" });
+      return;
+    }
+    const session = getSessionFromHeaders(req.headers);
+    if (!session) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+    const account = findUserByUsernameStmt.get(session.username);
+    if (!account) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
+
+    readRequestBody(req)
+      .then((body) => {
+        let data = null;
+        try {
+          data = JSON.parse(body || "{}");
+        } catch (error) {
+          sendJson(res, 400, { error: "invalid-json" });
+          return;
+        }
+        const confirm = Boolean(data && data.confirm);
+        const phrase = typeof data.phrase === "string" ? data.phrase.trim() : "";
+        if (!confirm || phrase !== "이해했습니다") {
+          sendJson(res, 400, { error: "confirmation-required" });
+          return;
+        }
+
+        if (session.sessionId) {
+          deleteSessionStmt.run(session.sessionId);
+        }
+        deleteUserByIdStmt.run(account.id);
+        const cookie = "session_id=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
+        sendJson(res, 200, { ok: true }, { "Set-Cookie": cookie });
+      })
+      .catch(() => sendJson(res, 500, { error: "failed" }));
     return;
   }
 
@@ -556,7 +874,16 @@ const server = http.createServer((req, res) => {
       return;
     }
     if (req.method === "GET") {
-      sendJson(res, 200, clipComments.get(clipId) || []);
+      const rows = listClipCommentsStmt.all(clipId);
+      const result = rows.map((row) => ({
+        id: String(row.id),
+        user: row.user_display,
+        userUsername: row.user_username,
+        userRole: row.user_role || "user",
+        text: row.text,
+        timestamp: row.created_at
+      }));
+      sendJson(res, 200, result);
       return;
     }
     if (req.method === "DELETE") {
@@ -574,19 +901,41 @@ const server = http.createServer((req, res) => {
             sendJson(res, 400, { error: "missing-id" });
             return;
           }
-          const history = clipComments.get(clipId) || [];
-          const target = history.find((entry) => entry.id === id);
+          const numericId = Number(id);
+          if (!Number.isFinite(numericId) || numericId <= 0) {
+            sendJson(res, 400, { error: "invalid-id" });
+            return;
+          }
+          const target = findClipCommentStmt.get(numericId, clipId);
           if (!target) {
             sendJson(res, 404, { error: "not-found" });
             return;
           }
-          if (session.role !== "admin" && target.user !== session.username) {
+
+          const isOwner = target.user_username === session.username;
+          if (session.role === "admin") {
+            // ok
+          } else if (session.role === "manager") {
+            if (!isOwner && target.user_role === "admin") {
+              sendJson(res, 403, { error: "forbidden" });
+              return;
+            }
+          } else if (!isOwner) {
             sendJson(res, 403, { error: "forbidden" });
             return;
           }
-          const next = history.filter((entry) => entry.id !== id);
-          clipComments.set(clipId, next);
-          sendJson(res, 200, next);
+
+          deleteClipCommentStmt.run(numericId, clipId);
+          const rows = listClipCommentsStmt.all(clipId);
+          const result = rows.map((row) => ({
+            id: String(row.id),
+            user: row.user_display,
+            userUsername: row.user_username,
+            userRole: row.user_role || "user",
+            text: row.text,
+            timestamp: row.created_at
+          }));
+          sendJson(res, 200, result);
         })
         .catch(() => sendJson(res, 500, { error: "failed" }));
       return;
@@ -609,16 +958,24 @@ const server = http.createServer((req, res) => {
           sendJson(res, 400, { error: "empty" });
           return;
         }
-        const entry = {
-          id: String(clipCommentSequence++),
-          user: session.username,
+        const createdAt = new Date().toISOString();
+        insertClipCommentStmt.run(
+          clipId,
+          session.username,
+          session.nickname || session.username,
           text,
-          timestamp: new Date().toISOString()
-        };
-        const history = clipComments.get(clipId) || [];
-        history.push(entry);
-        clipComments.set(clipId, history);
-        sendJson(res, 200, history);
+          createdAt
+        );
+        const rows = listClipCommentsStmt.all(clipId);
+        const result = rows.map((row) => ({
+          id: String(row.id),
+          user: row.user_display,
+          userUsername: row.user_username,
+          userRole: row.user_role || "user",
+          text: row.text,
+          timestamp: row.created_at
+        }));
+        sendJson(res, 200, result);
       })
       .catch(() => sendJson(res, 500, { error: "failed" }));
     return;
@@ -641,15 +998,66 @@ const server = http.createServer((req, res) => {
       });
       return;
     }
+    if (req.method === "DELETE") {
+      const session = getSessionFromHeaders(req.headers);
+      if (!session) {
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "unauthorized" }));
+        return;
+      }
+      if (session.role !== "admin") {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "forbidden" }));
+        return;
+      }
+      const baseUrl = `http://${req.headers.host || "localhost"}`;
+      const requestUrl = new URL(req.url || "", baseUrl);
+      const clipId = (requestUrl.searchParams.get("id") || "").trim();
+      if (!clipId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "missing-id" }));
+        return;
+      }
+      const filename = path.basename(clipId);
+      if (!/^fall-[0-9a-z]+-\d{8}-\d{6}-\d{3}\.webm$/i.test(filename)) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid-id" }));
+        return;
+      }
+      const filePath = path.join(clipsDir, filename);
+      if (!filePath.startsWith(clipsDir)) {
+        res.writeHead(403, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "forbidden" }));
+        return;
+      }
+      if (!fs.existsSync(filePath)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "not-found" }));
+        return;
+      }
+      try {
+        fs.unlinkSync(filePath);
+      } catch (error) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "delete-failed" }));
+        return;
+      }
+      try {
+        deleteClipCommentsByClipIdStmt.run(filename);
+      } catch (error) {
+        // ignore
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
     if (req.method === "POST") {
       const senderHeader = req.headers["x-fall-sender"] || "unknown";
       const senderId = String(senderHeader).replace(/[^0-9a-z]/gi, "") || "unknown";
       const timestampHeader = req.headers["x-fall-timestamp"];
       const timestamp = timestampHeader ? new Date(String(timestampHeader)) : new Date();
       const clipDate = Number.isNaN(timestamp.getTime()) ? new Date() : timestamp;
-      const clipStamp = formatClipStamp(clipDate);
-      const filename = `fall-${senderId}-${clipStamp}.webm`;
-      const filePath = path.join(clipsDir, filename);
+      const requestedStamp = formatClipStamp(clipDate);
       const chunks = [];
       req.on("data", (chunk) => chunks.push(chunk));
       req.on("end", () => {
@@ -661,31 +1069,47 @@ const server = http.createServer((req, res) => {
         }
         const nowMs = Date.now();
         const lastClip = lastClipBySender.get(senderId);
-        if (lastClip
-            && (lastClip.stamp === clipStamp
-              || nowMs - lastClip.savedAtMs < MIN_CLIP_GAP_MS)
-            && fs.existsSync(filePath)) {
-          const stats = fs.statSync(filePath);
-          lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(buildClipInfo(filename, stats)));
+        if (lastClip && nowMs - lastClip.savedAtMs < MIN_CLIP_GAP_MS) {
+          const existingStamp = lastClip.stamp;
+          const existingFilename = `fall-${senderId}-${existingStamp}.webm`;
+          const existingPath = path.join(clipsDir, existingFilename);
+          if (fs.existsSync(existingPath)) {
+            const stats = fs.statSync(existingPath);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(buildClipInfo(existingFilename, stats)));
+            return;
+          }
+          // A clip for this event is currently being written by another viewer.
+          res.writeHead(202, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true, pending: true }));
           return;
         }
+
+        const clipStamp = requestedStamp;
+        const filename = `fall-${senderId}-${clipStamp}.webm`;
+        const filePath = path.join(clipsDir, filename);
+        // Reserve stamp immediately to avoid duplicate writes.
+        lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
+
         if (fs.existsSync(filePath)) {
           const stats = fs.statSync(filePath);
-          lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(buildClipInfo(filename, stats)));
           return;
         }
+
         fs.writeFile(filePath, buffer, (writeErr) => {
           if (writeErr) {
+            // Allow retry if write failed.
+            const current = lastClipBySender.get(senderId);
+            if (current && current.stamp === clipStamp) {
+              lastClipBySender.delete(senderId);
+            }
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "write-failed" }));
             return;
           }
           const stats = fs.statSync(filePath);
-          lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify(buildClipInfo(filename, stats)));
         });
@@ -713,24 +1137,71 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  const contentType = filePath.endsWith(".html")
+    ? "text/html"
+    : filePath.endsWith(".js")
+      ? "text/javascript"
+      : filePath.endsWith(".css")
+        ? "text/css"
+        : filePath.endsWith(".png")
+          ? "image/png"
+          : filePath.endsWith(".webm")
+            ? "video/webm"
+            : "application/octet-stream";
+
+  if (filePath.endsWith(".webm")) {
+    fs.stat(filePath, (statErr, stats) => {
+      if (statErr) {
+        res.writeHead(404);
+        res.end("Not found");
+        return;
+      }
+      const range = req.headers.range;
+      const size = stats.size;
+      if (!range) {
+        res.writeHead(200, {
+          "Content-Type": contentType,
+          "Content-Length": size,
+          "Accept-Ranges": "bytes"
+        });
+        fs.createReadStream(filePath).pipe(res);
+        return;
+      }
+      const match = range.match(/bytes=(\d*)-(\d*)/);
+      if (!match) {
+        res.writeHead(416, { "Content-Range": `bytes */${size}` });
+        res.end();
+        return;
+      }
+      const start = match[1] ? Number(match[1]) : 0;
+      const end = match[2] ? Number(match[2]) : size - 1;
+      if (!Number.isFinite(start)
+          || !Number.isFinite(end)
+          || start > end
+          || start >= size) {
+        res.writeHead(416, { "Content-Range": `bytes */${size}` });
+        res.end();
+        return;
+      }
+      const clampedEnd = Math.min(end, size - 1);
+      res.writeHead(206, {
+        "Content-Type": contentType,
+        "Content-Range": `bytes ${start}-${clampedEnd}/${size}`,
+        "Content-Length": clampedEnd - start + 1,
+        "Accept-Ranges": "bytes"
+      });
+      fs.createReadStream(filePath, { start, end: clampedEnd }).pipe(res);
+    });
+    return;
+  }
+
   fs.readFile(filePath, (err, data) => {
     if (err) {
       res.writeHead(404);
       res.end("Not found");
       return;
     }
-    if (filePath.endsWith(".html")) {
-      res.setHeader("Content-Type", "text/html");
-    } else if (filePath.endsWith(".js")) {
-      res.setHeader("Content-Type", "text/javascript");
-    } else if (filePath.endsWith(".css")) {
-      res.setHeader("Content-Type", "text/css");
-    } else if (filePath.endsWith(".png")) {
-      res.setHeader("Content-Type", "image/png");
-    } else if (filePath.endsWith(".webm")) {
-      res.setHeader("Content-Type", "video/webm");
-    }
-    res.writeHead(200);
+    res.writeHead(200, { "Content-Type": contentType });
     res.end(data);
   });
 });
@@ -1110,13 +1581,66 @@ const broadcastToViewers = (payload) => {
   }
 };
 
+const enrichCommandEntry = (entry) => {
+  if (!entry || typeof entry !== "object") {
+    return entry;
+  }
+  const userUsername = typeof entry.userUsername === "string" && entry.userUsername
+    ? entry.userUsername
+    : (typeof entry.user === "string" ? entry.user : "");
+  let userRole = typeof entry.userRole === "string" ? entry.userRole : "";
+  if (!userRole && userUsername) {
+    const row = findUserRoleByUsernameStmt.get(userUsername);
+    userRole = row ? row.role : "";
+  }
+  return {
+    ...entry,
+    userUsername,
+    userRole
+  };
+};
+
+const enrichCommandEntries = (entries) => (entries || []).map(enrichCommandEntry);
+
+const getCommandHistoryKey = (senderId) => (
+  senderHistoryKeyById.get(senderId) || senderId
+);
+
+const toCommandEntry = (row) => ({
+  id: String(row.id),
+  user: row.user_display,
+  userUsername: row.user_username,
+  userRole: row.user_role,
+  text: row.text,
+  timestamp: row.created_at
+});
+
+const loadCommandHistoryForKey = (historyKey) => {
+  const rows = listCommandHistoryStmt.all(historyKey);
+  const entries = rows.map(toCommandEntry);
+  commandHistory.set(historyKey, entries);
+  return entries;
+};
+
+const getCommandHistoryForKey = (historyKey) => {
+  if (commandHistory.has(historyKey)) {
+    return commandHistory.get(historyKey) || [];
+  }
+  return loadCommandHistoryForKey(historyKey);
+};
+
+const getCommandHistoryForSender = (senderId) => (
+  getCommandHistoryForKey(getCommandHistoryKey(senderId))
+);
+
 const sendHistoryToViewer = (viewerSocket) => {
-  for (const [senderId, entries] of commandHistory.entries()) {
+  for (const senderId of senders.keys()) {
+    const entries = getCommandHistoryForSender(senderId);
     try {
       viewerSocket.send(JSON.stringify({
         type: "command-history",
         senderId,
-        entries
+        entries: enrichCommandEntries(entries)
       }));
     } catch (error) {
       // ignore
@@ -1125,12 +1649,12 @@ const sendHistoryToViewer = (viewerSocket) => {
 };
 
 const sendHistoryToSender = (senderId, senderSocket) => {
-  const entries = commandHistory.get(senderId) || [];
+  const entries = getCommandHistoryForSender(senderId);
   try {
     senderSocket.send(JSON.stringify({
       type: "command-history",
       senderId,
-      entries
+      entries: enrichCommandEntries(entries)
     }));
   } catch (error) {
     // ignore
@@ -1252,7 +1776,9 @@ const closeSender = (senderId) => {
     sender.pc.close();
   }
   senders.delete(senderId);
-  commandHistory.delete(senderId);
+  const historyKey = getCommandHistoryKey(senderId);
+  commandHistory.delete(historyKey);
+  senderHistoryKeyById.delete(senderId);
   broadcastToViewers(JSON.stringify({
     type: "command-history",
     senderId,
@@ -1279,10 +1805,26 @@ const closeSender = (senderId) => {
 };
 
 wss.on("connection", (socket, req) => {
-  socket.user = getSessionFromHeaders(req.headers);
   const requestUrl = req.url || "";
+  let sid = "";
+  try {
+    const url = new URL(requestUrl, "http://localhost");
+    sid = (url.searchParams.get("sid") || "").trim();
+  } catch (error) {
+    sid = "";
+  }
+  const sidSession = sid ? getSessionById(sid) : null;
+  socket.user = sidSession || getSessionFromHeaders(req.headers);
   const isSender = requestUrl.includes("sender");
   const isViewer = requestUrl.includes("viewer");
+  let deviceId = "";
+  try {
+    const url = new URL(requestUrl, "http://localhost");
+    deviceId = (url.searchParams.get("deviceId") || url.searchParams.get("device_id") || "").trim();
+  } catch (error) {
+    deviceId = "";
+  }
+  const sanitizedDeviceId = deviceId.replace(/[^0-9a-zA-Z_-]/g, "");
 
   if (isSender) {
     const senderId = allocateSenderId();
@@ -1292,6 +1834,9 @@ wss.on("connection", (socket, req) => {
     }
 
     socket.senderId = senderId;
+    if (sanitizedDeviceId) {
+      senderHistoryKeyById.set(senderId, sanitizedDeviceId);
+    }
     senders.set(senderId, {
       socket,
       pc: null,
@@ -1403,19 +1948,42 @@ wss.on("connection", (socket, req) => {
       if (!sender || !sender.socket) {
         return;
       }
+      const createdAt = new Date().toISOString();
+      let entryId = String(Date.now());
+      try {
+        const result = insertCommandHistoryStmt.run(
+          senderId,
+          session.username,
+          session.nickname || session.username,
+          session.role,
+          text,
+          createdAt
+        );
+        const lastId = result && (typeof result.lastInsertRowid === "number"
+          || typeof result.lastInsertRowid === "bigint")
+          ? result.lastInsertRowid
+          : null;
+        if (lastId !== null) {
+          entryId = String(lastId);
+        }
+      } catch (error) {
+        // fall back to in-memory entry only
+      }
       const entry = {
-        id: String(commandSequence++),
-        user: session.username,
+        id: entryId,
+        user: session.nickname || session.username,
+        userUsername: session.username,
+        userRole: session.role,
         text,
-        timestamp: new Date().toISOString()
+        timestamp: createdAt
       };
-      const history = commandHistory.get(senderId) || [];
+      const history = getCommandHistoryForSender(senderId);
       history.push(entry);
       commandHistory.set(senderId, history);
       const entryPayload = JSON.stringify({
         type: "command-entry",
         senderId,
-        entry
+        entry: enrichCommandEntry(entry)
       });
       broadcastToViewers(entryPayload);
       try {
@@ -1444,20 +2012,54 @@ wss.on("connection", (socket, req) => {
       if (!id) {
         return;
       }
-      const history = commandHistory.get(senderId) || [];
+      const historyKey = getCommandHistoryKey(senderId);
+      const history = getCommandHistoryForKey(historyKey);
       const target = history.find((entry) => entry.id === id);
       if (!target) {
         return;
       }
-      if (session && session.role !== "admin" && target.user !== session.username) {
+
+      const displayName = (session && (session.nickname || session.username)) || "";
+      const targetUsername = typeof target.userUsername === "string" ? target.userUsername : "";
+      const fallbackUsername = !targetUsername && typeof target.user === "string" ? target.user : "";
+      const lookupUsername = targetUsername || fallbackUsername;
+      const isOwner = Boolean(session)
+        && (((lookupUsername && lookupUsername === session.username))
+          || target.user === session.username
+          || target.user === displayName);
+
+      if (session.role === "admin") {
+        // ok
+      } else if (session.role === "manager") {
+        let targetRole = typeof target.userRole === "string" ? target.userRole : "";
+        if (!targetRole && lookupUsername) {
+          const row = findUserRoleByUsernameStmt.get(lookupUsername);
+          targetRole = row ? row.role : "";
+        }
+        if (!isOwner && targetRole === "admin") {
+          return;
+        }
+        if (!isOwner && !targetRole) {
+          // Unknown author role -> do not allow manager to delete.
+          return;
+        }
+      } else if (!isOwner) {
         return;
       }
+      const numericId = Number(id);
+      if (Number.isFinite(numericId) && numericId > 0) {
+        try {
+          deleteCommandHistoryStmt.run(numericId, historyKey);
+        } catch (error) {
+          // ignore
+        }
+      }
       const next = history.filter((entry) => entry.id !== id);
-      commandHistory.set(senderId, next);
+      commandHistory.set(historyKey, next);
       const historyPayload = JSON.stringify({
         type: "command-history",
         senderId,
-        entries: next
+        entries: enrichCommandEntries(next)
       });
       broadcastToViewers(historyPayload);
       const sender = senders.get(senderId);

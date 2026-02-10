@@ -60,6 +60,15 @@ if (authFormEl) {
         return;
       }
 
+      let payload = null;
+      try {
+        payload = await response.json();
+      } catch (parseError) {
+        payload = null;
+      }
+      if (payload && payload.sessionId) {
+        sessionStorage.setItem("session_id", String(payload.sessionId));
+      }
       location.href = "/";
     } catch (error) {
       setError("Login failed");

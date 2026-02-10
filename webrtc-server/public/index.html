@@ -56,8 +56,19 @@
       </div>
     </div>
     <div id="approvalView">
-      <div class="approvalTitle">승인 요청</div>
+      <div class="approvalHeader">
+        <div class="approvalTitle">승인 요청</div>
+        <button id="approvalRefresh" class="approvalRefresh" type="button">Refresh</button>
+      </div>
       <div id="approvalList" class="approvalList"></div>
+    </div>
+    <div id="usersView">
+      <div class="approvalTitle">권한 관리</div>
+      <div class="usersActions">
+        <div id="usersSaveStatus" class="usersSaveStatus"></div>
+        <button id="usersSave" class="usersSave" type="button" disabled>Save</button>
+      </div>
+      <div id="usersList" class="usersList"></div>
     </div>
     <div id="commandPanel" aria-label="Command panel">
       <div class="commandTitle">Command</div>

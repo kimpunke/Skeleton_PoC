@@ -26,12 +26,21 @@
           />
           <button id="toggleSignupPassword" type="button">Show</button>
         </div>
-        <input
-          id="signupPasswordConfirm"
-          type="password"
-          placeholder="Confirm password"
-          aria-label="Confirm password"
-        />
+        <div class="passwordPolicy" aria-label="Password requirements">
+          <div id="policyLength" class="policyItem"></div>
+          <div id="policyNumber" class="policyItem"></div>
+          <div id="policySpecial" class="policyItem"></div>
+          <div id="policyMatch" class="policyItem"></div>
+        </div>
+        <div class="passwordRow">
+          <input
+            id="signupPasswordConfirm"
+            type="password"
+            placeholder="Confirm password"
+            aria-label="Confirm password"
+          />
+          <button id="toggleSignupPasswordConfirm" type="button">Show</button>
+        </div>
         <textarea
           id="signupReason"
           placeholder="Reason for access"

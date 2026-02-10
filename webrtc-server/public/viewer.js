@@ -6,8 +6,56 @@ const apiBase = location.protocol === "file:"
   ? "http://localhost:3000"
   : `${apiProtocol}//${apiHost}:${apiPort}`;
 const wsProtocol = apiProtocol === "https:" ? "wss" : "ws";
-const wsUrl = `${wsProtocol}://${apiHost}:${apiPort}/ws?viewer`;
-const ws = new WebSocket(wsUrl);
+
+const getSessionId = () => sessionStorage.getItem("session_id") || "";
+
+const apiFetch = (path, options = {}) => {
+  const headers = new Headers(options.headers || {});
+  const sessionId = getSessionId();
+  if (sessionId) {
+    headers.set("X-Session-Id", sessionId);
+  }
+  return fetch(`${apiBase}${path}`,
+    {
+      credentials: "include",
+      ...options,
+      headers
+    }
+  );
+};
+
+const buildWsUrl = () => {
+  const sid = getSessionId();
+  const suffix = sid ? `&sid=${encodeURIComponent(sid)}` : "";
+  return `${wsProtocol}://${apiHost}:${apiPort}/ws?viewer${suffix}`;
+};
+
+let ws = null;
+let wsBoundSessionId = null;
+
+const initWebSocket = () => {
+  wsBoundSessionId = getSessionId() || "";
+  const next = new WebSocket(buildWsUrl());
+  ws = next;
+  ws.onmessage = handleWsMessage;
+  ws.onclose = handleWsClose;
+  ws.onerror = handleWsError;
+};
+
+const ensureWebSocketSession = () => {
+  const sid = getSessionId() || "";
+  if (ws && wsBoundSessionId === sid) {
+    return;
+  }
+  try {
+    if (ws) {
+      ws.close();
+    }
+  } catch (error) {
+    // ignore
+  }
+  initWebSocket();
+};
 const viewerCountEl = document.getElementById("viewerCount");
 const headerHostEl = document.getElementById("headerHost");
 const gridEl = document.getElementById("grid");
@@ -20,19 +68,30 @@ const exceptionListEl = document.getElementById("exceptionList");
 const exceptionPlayerEl = document.getElementById("exceptionPlayer");
 const approvalViewEl = document.getElementById("approvalView");
 const approvalListEl = document.getElementById("approvalList");
+const approvalRefreshEl = document.getElementById("approvalRefresh");
+const usersViewEl = document.getElementById("usersView");
+const usersListEl = document.getElementById("usersList");
+const usersSaveButtonEl = document.getElementById("usersSave");
+const usersSaveStatusEl = document.getElementById("usersSaveStatus");
 const commandUserEl = document.getElementById("commandUser");
 const commandPanelEl = document.getElementById("commandPanel");
 const footerHostEl = document.getElementById("footerHost");
-let footerUserEl = null;
+let footerUserWrapEl = null;
+let footerUserButtonEl = null;
+let footerDropdownEl = null;
+let footerAccountButtonEl = null;
+let footerLogoutButtonEl = null;
 let loginButtonEl = null;
-let logoutButtonEl = null;
+let documentClickHandler = null;
 const commandFormEl = document.getElementById("commandForm");
 const commandInputEl = document.getElementById("commandInput");
 const commandHistoryEl = document.getElementById("commandHistory");
 const exceptionCommentListEl = document.getElementById("exceptionCommentList");
 const exceptionCommentFormEl = document.getElementById("exceptionCommentForm");
 const exceptionCommentInputEl = document.getElementById("exceptionCommentInput");
-const FALL_PREBUFFER_MS = 30000;
+const FALL_PREBUFFER_MS = 15000;
+const FALL_POSTBUFFER_MS = 5000;
+const FALL_CHUNK_MS = 1000;
 const slots = new Map();
 const peerConnections = new Map();
 let focusedSenderId = null;
@@ -42,6 +101,25 @@ const commandHistoryBySender = new Map();
 let currentUser = null;
 const clipCommentsById = new Map();
 let currentClipId = null;
+
+const pendingRoleChanges = new Map();
+
+const setUsersSaveStatus = (text) => {
+  if (usersSaveStatusEl) {
+    usersSaveStatusEl.textContent = text || "";
+  }
+};
+
+const updateUsersSaveUi = () => {
+  if (usersSaveButtonEl) {
+    usersSaveButtonEl.disabled = pendingRoleChanges.size === 0;
+  }
+  if (pendingRoleChanges.size === 0) {
+    setUsersSaveStatus("");
+  } else {
+    setUsersSaveStatus(`Pending changes: ${pendingRoleChanges.size}`);
+  }
+};
 
 const showFallAlert = (senderId) => {
   if (!fallAlertEl) {
@@ -82,13 +160,24 @@ const renderCommandHistory = (senderId) => {
     text.className = "commandHistoryText";
     text.textContent = `${entry.user}: ${entry.text}`;
     item.appendChild(text);
-    if (currentUser && (currentUser.role === "admin" || entry.user === currentUser.username)) {
+    const displayName = currentUser ? (currentUser.nickname || currentUser.username) : "";
+    const entryUsername = entry && typeof entry.userUsername === "string" ? entry.userUsername : "";
+    const entryRole = entry && typeof entry.userRole === "string" ? entry.userRole : "";
+    const isOwner = currentUser && ((entryUsername && entryUsername === currentUser.username)
+      || entry.user === currentUser.username
+      || entry.user === displayName);
+    const isAdmin = currentUser && currentUser.role === "admin";
+    const isManager = currentUser && currentUser.role === "manager";
+    const canDeleteOther = isAdmin || (isManager && entryRole && entryRole !== "admin");
+    if (currentUser && (isOwner || canDeleteOther)) {
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
       deleteButton.className = "commandDelete";
       deleteButton.textContent = "Delete";
       deleteButton.dataset.id = entry.id;
       deleteButton.dataset.user = entry.user || "";
+      deleteButton.dataset.role = entryRole || "";
+      deleteButton.dataset.username = entryUsername || "";
       item.appendChild(deleteButton);
     }
     commandHistoryEl.appendChild(item);
@@ -119,10 +208,10 @@ const setCommandHistory = (senderId, entries) => {
 const updateAuthUi = () => {
   const loggedIn = Boolean(currentUser);
   const isAdmin = loggedIn && currentUser && currentUser.role === "admin";
-  if (!loggedIn && (currentMode === "exception" || currentMode === "approval")) {
+  if (!loggedIn && (currentMode === "exception" || currentMode === "approval" || currentMode === "users")) {
     setMode("live");
   }
-  if (!isAdmin && currentMode === "approval") {
+  if (!isAdmin && (currentMode === "approval" || currentMode === "users")) {
     setMode("live");
   }
   if (commandPanelEl) {
@@ -136,24 +225,30 @@ const updateAuthUi = () => {
   if (approvalButton) {
     approvalButton.style.display = isAdmin ? "" : "none";
   }
+  const usersButton = document.getElementById("modeUsers");
+  if (usersButton) {
+    usersButton.style.display = isAdmin ? "" : "none";
+  }
   if (commandFormEl) {
     commandFormEl.style.display = loggedIn ? "flex" : "none";
   }
   if (commandUserEl) {
     commandUserEl.textContent = loggedIn
-      ? `User: ${currentUser.username}`
+      ? `User: ${currentUser.nickname || currentUser.username}`
       : "Login required";
   }
-  if (footerUserEl) {
-    footerUserEl.textContent = loggedIn
-      ? `${currentUser.username} (${currentUser.role})`
-      : "";
+  if (footerUserWrapEl) {
+    footerUserWrapEl.style.display = loggedIn ? "inline-flex" : "none";
   }
+  if (footerUserButtonEl) {
+    footerUserButtonEl.textContent = loggedIn
+      ? `${currentUser.nickname || currentUser.username} (${currentUser.role})`
+      : "";
+    footerUserButtonEl.disabled = !loggedIn;
+  }
+  closeFooterDropdown();
   if (loginButtonEl) {
     loginButtonEl.style.display = loggedIn ? "none" : "inline-flex";
-  }
-  if (logoutButtonEl) {
-    logoutButtonEl.style.display = loggedIn ? "inline-flex" : "none";
   }
   if (exceptionCommentFormEl) {
     exceptionCommentFormEl.style.display = loggedIn ? "flex" : "none";
@@ -162,16 +257,63 @@ const updateAuthUi = () => {
   renderClipComments(currentClipId, loggedIn ? clipCommentsById.get(currentClipId) : null);
 };
 
+const closeFooterDropdown = () => {
+  if (footerDropdownEl) {
+    footerDropdownEl.classList.remove("visible");
+  }
+  if (footerUserButtonEl) {
+    footerUserButtonEl.setAttribute("aria-expanded", "false");
+  }
+  if (documentClickHandler) {
+    document.removeEventListener("click", documentClickHandler);
+    documentClickHandler = null;
+  }
+};
+
+const toggleFooterDropdown = () => {
+  if (!footerDropdownEl || !footerUserButtonEl) {
+    return;
+  }
+  const open = footerDropdownEl.classList.toggle("visible");
+  footerUserButtonEl.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open && !documentClickHandler) {
+    documentClickHandler = (event) => {
+      if (!footerDropdownEl || !footerUserWrapEl) {
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (!footerUserWrapEl.contains(target)) {
+        closeFooterDropdown();
+      }
+    };
+    setTimeout(() => {
+      if (documentClickHandler) {
+        document.addEventListener("click", documentClickHandler);
+      }
+    }, 0);
+  }
+  if (!open) {
+    closeFooterDropdown();
+  }
+};
+
 const loadSession = async () => {
   try {
-    const response = await fetch(`${apiBase}/api/session`, { credentials: "include" });
+    const response = await apiFetch("/api/session");
     if (!response.ok) {
       currentUser = null;
       updateAuthUi();
       return;
     }
     currentUser = await response.json();
+    if (currentUser && currentUser.sessionId) {
+      sessionStorage.setItem("session_id", String(currentUser.sessionId));
+    }
     updateAuthUi();
+    ensureWebSocketSession();
   } catch (error) {
     currentUser = null;
     updateAuthUi();
@@ -273,9 +415,7 @@ const loadSignupRequests = async () => {
     return;
   }
   try {
-    const response = await fetch(`${apiBase}/api/admin/signup-requests`, {
-      credentials: "include"
-    });
+    const response = await apiFetch("/api/admin/signup-requests");
     if (!response.ok) {
       renderSignupRequests([]);
       return;
@@ -284,6 +424,105 @@ const loadSignupRequests = async () => {
     renderSignupRequests(list);
   } catch (error) {
     renderSignupRequests([]);
+  }
+};
+
+if (approvalRefreshEl) {
+  approvalRefreshEl.addEventListener("click", () => {
+    void loadSignupRequests();
+  });
+}
+
+const renderUsers = (users) => {
+  if (!usersListEl) {
+    return;
+  }
+  usersListEl.innerHTML = "";
+
+  if (!currentUser || currentUser.role !== "admin") {
+    const empty = document.createElement("div");
+    empty.className = "approvalReason";
+    empty.textContent = "Admin only";
+    usersListEl.appendChild(empty);
+    return;
+  }
+
+  if (!Array.isArray(users) || users.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "approvalReason";
+    empty.textContent = "No users";
+    usersListEl.appendChild(empty);
+    return;
+  }
+
+  for (const user of users) {
+    const item = document.createElement("div");
+    item.className = "userItem";
+    const meta = document.createElement("div");
+    meta.className = "userMeta";
+
+    const name = document.createElement("div");
+    name.className = "userName";
+    name.textContent = user.username || "";
+
+    const nick = document.createElement("div");
+    nick.className = "userNick";
+    nick.textContent = user.nickname ? `Chat: ${user.nickname}` : "";
+
+    meta.appendChild(name);
+    meta.appendChild(nick);
+
+    const select = document.createElement("select");
+    select.className = "userRoleSelect";
+    select.dataset.id = user.id;
+    const roles = ["user", "manager", "admin"];
+    for (const role of roles) {
+      const option = document.createElement("option");
+      option.value = role;
+      option.textContent = role;
+      if (role === user.role) {
+        option.selected = true;
+      }
+      select.appendChild(option);
+    }
+    if (user.username === currentUser.username) {
+      select.disabled = true;
+      select.title = "Cannot change your own role";
+    }
+
+    const pending = pendingRoleChanges.get(String(user.id));
+    if (pending && pending !== user.role) {
+      select.value = pending;
+      select.classList.add("pending");
+    } else {
+      select.classList.remove("pending");
+    }
+
+    item.appendChild(meta);
+    item.appendChild(select);
+    usersListEl.appendChild(item);
+  }
+  updateUsersSaveUi();
+};
+
+const loadUsers = async () => {
+  if (!usersListEl) {
+    return;
+  }
+  if (!currentUser || currentUser.role !== "admin") {
+    renderUsers([]);
+    return;
+  }
+  try {
+    const response = await apiFetch("/api/admin/users");
+    if (!response.ok) {
+      renderUsers([]);
+      return;
+    }
+    const list = await response.json();
+    renderUsers(list);
+  } catch (error) {
+    renderUsers([]);
   }
 };
 
@@ -321,13 +560,24 @@ const renderClipComments = (clipId, comments) => {
     text.className = "exceptionCommentText";
     text.textContent = `${entry.user}: ${entry.text}`;
     item.appendChild(text);
-    if (currentUser && (currentUser.role === "admin" || entry.user === currentUser.username)) {
+    const displayName = currentUser ? (currentUser.nickname || currentUser.username) : "";
+    const entryUsername = entry && typeof entry.userUsername === "string" ? entry.userUsername : "";
+    const entryRole = entry && typeof entry.userRole === "string" ? entry.userRole : "";
+    const isOwner = currentUser && ((entryUsername && entryUsername === currentUser.username)
+      || entry.user === currentUser.username
+      || entry.user === displayName);
+    const isAdmin = currentUser && currentUser.role === "admin";
+    const isManager = currentUser && currentUser.role === "manager";
+    const canDeleteOther = isAdmin || (isManager && entryRole && entryRole !== "admin");
+    if (currentUser && (isOwner || canDeleteOther)) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "exceptionCommentDelete";
       button.textContent = "Delete";
       button.dataset.id = entry.id;
       button.dataset.user = entry.user || "";
+      button.dataset.role = entryRole || "";
+      button.dataset.username = entryUsername || "";
       item.appendChild(button);
     }
     exceptionCommentListEl.appendChild(item);
@@ -341,9 +591,7 @@ const loadClipComments = async (clipId) => {
     return;
   }
   try {
-    const response = await fetch(`${apiBase}/api/clip-comments?clipId=${encodeURIComponent(clipId)}`,
-      { credentials: "include" }
-    );
+    const response = await apiFetch(`/api/clip-comments?clipId=${encodeURIComponent(clipId)}`);
     if (!response.ok) {
       renderClipComments(clipId, null);
       return;
@@ -374,10 +622,9 @@ const submitClipComment = async () => {
     return;
   }
   try {
-    const response = await fetch(`${apiBase}/api/clip-comments?clipId=${encodeURIComponent(currentClipId)}`,
+    const response = await apiFetch(`/api/clip-comments?clipId=${encodeURIComponent(currentClipId)}`,
       {
         method: "POST",
-        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text })
       }
@@ -400,6 +647,9 @@ const sendCommand = () => {
   }
   const text = commandInputEl.value.trim();
   if (!text) {
+    return;
+  }
+  if (!ws) {
     return;
   }
   ws.send(JSON.stringify({
@@ -499,8 +749,10 @@ for (let i = 1; i <= MAX_SENDERS; i += 1) {
     label,
     recorder: null,
     recordedChunks: [],
+    bufferChunks: [],
     fallActive: false,
     fallStartedAt: null,
+    fallStopTimer: null,
     isFallen: false,
     streamId: null,
     stream: null,
@@ -531,8 +783,13 @@ const startRecorder = (slot, stream) => {
   slot.streamId = stream.id;
   slot.stream = stream;
   slot.recordedChunks = [];
+  slot.bufferChunks = [];
   slot.fallActive = false;
   slot.fallStartedAt = null;
+  if (slot.fallStopTimer) {
+    clearTimeout(slot.fallStopTimer);
+    slot.fallStopTimer = null;
+  }
   slot.pendingUpload = false;
   slot.pendingSenderId = null;
   slot.restartAfterStop = false;
@@ -541,7 +798,22 @@ const startRecorder = (slot, stream) => {
     if (!event.data || event.data.size === 0) {
       return;
     }
-    slot.recordedChunks.push(event.data);
+    const now = Date.now();
+    if (slot.fallActive || slot.pendingUpload) {
+      slot.recordedChunks.push({
+        data: event.data,
+        timestamp: now
+      });
+      return;
+    }
+    slot.bufferChunks.push({
+      data: event.data,
+      timestamp: now
+    });
+    const cutoff = now - FALL_PREBUFFER_MS;
+    while (slot.bufferChunks.length > 0 && slot.bufferChunks[0].timestamp < cutoff) {
+      slot.bufferChunks.shift();
+    }
   };
 
   recorder.onstop = () => {
@@ -556,18 +828,20 @@ const startRecorder = (slot, stream) => {
     slot.pendingSenderId = null;
     slot.restartAfterStop = false;
     slot.fallStartedAt = null;
+    if (slot.fallStopTimer) {
+      clearTimeout(slot.fallStopTimer);
+      slot.fallStopTimer = null;
+    }
     slot.recorder = null;
     if (shouldUpload) {
-      finalizeFallClipData(chunks, senderId, fallStartedAt);
+      void finalizeFallClipData(chunks, senderId, fallStartedAt);
     }
     if (shouldRestart && nextStream) {
       startRecorder(slot, nextStream);
-      scheduleRecorderRoll(slot);
     }
   };
 
-  recorder.start();
-  scheduleRecorderRoll(slot);
+  recorder.start(FALL_CHUNK_MS);
 };
 
 const stopRecorder = (slot) => {
@@ -582,7 +856,12 @@ const stopRecorder = (slot) => {
     slot.recorder.stop();
   }
   slot.recordedChunks = [];
+  slot.bufferChunks = [];
   slot.fallActive = false;
+  if (slot.fallStopTimer) {
+    clearTimeout(slot.fallStopTimer);
+    slot.fallStopTimer = null;
+  }
   slot.streamId = null;
   slot.stream = null;
   slot.pendingUpload = false;
@@ -621,6 +900,16 @@ const startFallClip = (slot) => {
   }
   slot.fallActive = true;
   slot.fallStartedAt = Date.now();
+  if (slot.fallStopTimer) {
+    clearTimeout(slot.fallStopTimer);
+    slot.fallStopTimer = null;
+  }
+  if (slot.bufferChunks && slot.bufferChunks.length > 0) {
+    slot.recordedChunks = slot.bufferChunks.slice();
+    slot.bufferChunks = [];
+  } else {
+    slot.recordedChunks = [];
+  }
   if (slot.rollTimer) {
     clearTimeout(slot.rollTimer);
     slot.rollTimer = null;
@@ -638,21 +927,217 @@ const finishFallClip = (slot, senderId) => {
   slot.pendingUpload = true;
   slot.pendingSenderId = senderId;
   slot.restartAfterStop = true;
-  slot.recorder.stop();
+  if (slot.fallStopTimer) {
+    clearTimeout(slot.fallStopTimer);
+  }
+  slot.fallStopTimer = setTimeout(() => {
+    slot.fallStopTimer = null;
+    if (!slot.recorder || slot.recorder.state !== "recording") {
+      return;
+    }
+    if (slot.fallActive) {
+      return;
+    }
+    slot.recorder.stop();
+  }, FALL_POSTBUFFER_MS);
 };
 
-const finalizeFallClipData = (chunks, senderId, fallStartedAt) => {
+const normalizeFallChunks = (chunks, fallStartedAt) => {
+  const data = [];
+  let firstTimestamp = null;
+  let lastTimestamp = null;
+  for (const entry of chunks) {
+    if (!entry) {
+      continue;
+    }
+    if (entry.data) {
+      data.push(entry.data);
+      if (Number.isFinite(entry.timestamp)) {
+        if (firstTimestamp === null) {
+          firstTimestamp = entry.timestamp;
+        }
+        lastTimestamp = entry.timestamp;
+      }
+    } else {
+      data.push(entry);
+    }
+  }
+  let durationMs = 0;
+  if (firstTimestamp !== null && lastTimestamp !== null) {
+    durationMs = Math.max(FALL_CHUNK_MS, lastTimestamp - firstTimestamp + FALL_CHUNK_MS);
+  } else if (Number.isFinite(fallStartedAt)) {
+    durationMs = Math.max(FALL_CHUNK_MS, Date.now() - fallStartedAt);
+  } else {
+    durationMs = data.length * FALL_CHUNK_MS;
+  }
+  return { data, durationMs };
+};
+
+const getVintLength = (firstByte) => {
+  let mask = 0x80;
+  let length = 1;
+  while (length <= 8 && (firstByte & mask) === 0) {
+    mask >>= 1;
+    length += 1;
+  }
+  return length <= 8 ? length : null;
+};
+
+const readVintId = (data, offset) => {
+  const length = getVintLength(data[offset]);
+  if (!length || offset + length > data.length) {
+    return null;
+  }
+  let value = 0;
+  for (let i = 0; i < length; i += 1) {
+    value = (value << 8) + data[offset + i];
+  }
+  return { length, value };
+};
+
+const readVintSize = (data, offset) => {
+  const length = getVintLength(data[offset]);
+  if (!length || offset + length > data.length) {
+    return null;
+  }
+  const mask = 0xFF >> length;
+  let value = data[offset] & mask;
+  for (let i = 1; i < length; i += 1) {
+    value = (value << 8) + data[offset + i];
+  }
+  const max = Math.pow(2, 7 * length) - 1;
+  if (value === max) {
+    return { length, value: -1 };
+  }
+  return { length, value };
+};
+
+const fixWebmDuration = async (blob, durationMs) => {
+  if (!blob || !Number.isFinite(durationMs) || durationMs <= 0) {
+    return blob;
+  }
+  const buffer = await blob.arrayBuffer();
+  const data = new Uint8Array(buffer);
+  let offset = 0;
+  let segmentStart = null;
+  let segmentEnd = data.length;
+
+  while (offset < data.length) {
+    const id = readVintId(data, offset);
+    if (!id) {
+      break;
+    }
+    offset += id.length;
+    const size = readVintSize(data, offset);
+    if (!size) {
+      break;
+    }
+    offset += size.length;
+    if (id.value === 0x18538067) {
+      segmentStart = offset;
+      segmentEnd = size.value === -1 ? data.length : offset + size.value;
+      break;
+    }
+    offset += size.value === -1 ? 0 : size.value;
+  }
+
+  if (segmentStart === null) {
+    return blob;
+  }
+
+  let infoOffset = null;
+  let infoSize = null;
+  let timecodeScale = 1000000;
+  offset = segmentStart;
+
+  while (offset < segmentEnd) {
+    const id = readVintId(data, offset);
+    if (!id) {
+      break;
+    }
+    offset += id.length;
+    const size = readVintSize(data, offset);
+    if (!size) {
+      break;
+    }
+    offset += size.length;
+    if (id.value === 0x1549A966) {
+      infoOffset = offset;
+      infoSize = size.value;
+      break;
+    }
+    offset += size.value === -1 ? 0 : size.value;
+  }
+
+  if (infoOffset === null || infoSize === null || infoSize === -1) {
+    return blob;
+  }
+
+  let durationOffset = null;
+  let durationSize = null;
+  const infoEnd = infoOffset + infoSize;
+  offset = infoOffset;
+
+  while (offset < infoEnd) {
+    const id = readVintId(data, offset);
+    if (!id) {
+      break;
+    }
+    offset += id.length;
+    const size = readVintSize(data, offset);
+    if (!size) {
+      break;
+    }
+    offset += size.length;
+    if (id.value === 0x2AD7B1) {
+      let scale = 0;
+      for (let i = 0; i < size.value; i += 1) {
+        scale = (scale << 8) + data[offset + i];
+      }
+      if (scale > 0) {
+        timecodeScale = scale;
+      }
+    }
+    if (id.value === 0x4489) {
+      durationOffset = offset;
+      durationSize = size.value;
+      break;
+    }
+    offset += size.value;
+  }
+
+  if (durationOffset === null || !durationSize) {
+    return blob;
+  }
+
+  const duration = (durationMs * 1000000) / timecodeScale;
+  const view = new DataView(buffer);
+  if (durationSize === 4) {
+    view.setFloat32(durationOffset, duration);
+  } else {
+    view.setFloat64(durationOffset, duration);
+  }
+
+  return new Blob([buffer], { type: "video/webm" });
+};
+
+const finalizeFallClipData = async (chunks, senderId, fallStartedAt) => {
   if (!chunks || chunks.length === 0) {
     return;
   }
-  const blob = new Blob(chunks, { type: "video/webm" });
+  const { data, durationMs } = normalizeFallChunks(chunks, fallStartedAt);
+  if (data.length === 0) {
+    return;
+  }
+  const blob = new Blob(data, { type: "video/webm" });
+  const fixedBlob = await fixWebmDuration(blob, durationMs);
   const timestamp = new Date(fallStartedAt || Date.now()).toISOString();
-  void uploadFallClip(blob, senderId, timestamp);
+  void uploadFallClip(fixedBlob, senderId, timestamp);
 };
 
 const uploadFallClip = async (blob, senderId, timestamp) => {
   try {
-    const response = await fetch(`${apiBase}/api/fall-clips`, {
+    const response = await apiFetch("/api/fall-clips", {
       method: "POST",
       headers: {
         "Content-Type": "application/octet-stream",
@@ -689,7 +1174,7 @@ const loadFallClips = async () => {
   currentClipId = null;
   renderClipComments(null, null);
   try {
-    const response = await fetch(`${apiBase}/api/fall-clips`);
+    const response = await apiFetch("/api/fall-clips");
     if (!response.ok) {
       exceptionListEl.textContent = "No fall clips";
       renderClipComments(null, null);
@@ -702,6 +1187,9 @@ const loadFallClips = async () => {
       return;
     }
     for (const clip of clips) {
+      const row = document.createElement("div");
+      row.className = "exceptionItemRow";
+
       const item = document.createElement("button");
       item.type = "button";
       item.className = "exceptionItem";
@@ -716,7 +1204,49 @@ const loadFallClips = async () => {
         }
         selectClip(clip);
       });
-      exceptionListEl.appendChild(item);
+      row.appendChild(item);
+
+      if (currentUser && currentUser.role === "admin") {
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "exceptionClipDelete";
+        del.textContent = "Delete";
+        del.dataset.id = clip.id;
+        del.addEventListener("click", async (event) => {
+          event.stopPropagation();
+          const clipId = del.dataset.id;
+          if (!clipId) {
+            return;
+          }
+          if (!confirm("Delete this clip?")) {
+            return;
+          }
+          try {
+            const res = await apiFetch(`/api/fall-clips?id=${encodeURIComponent(clipId)}`,
+              { method: "DELETE" }
+            );
+            if (!res.ok) {
+              return;
+            }
+            if (currentClipId === clipId) {
+              currentClipId = null;
+              clipCommentsById.delete(clipId);
+              renderClipComments(null, null);
+              if (exceptionPlayerEl) {
+                exceptionPlayerEl.pause();
+                exceptionPlayerEl.removeAttribute("src");
+                exceptionPlayerEl.load();
+              }
+            }
+            await loadFallClips();
+          } catch (error) {
+            // ignore
+          }
+        });
+        row.appendChild(del);
+      }
+
+      exceptionListEl.appendChild(row);
     }
   } catch (error) {
     exceptionListEl.textContent = "No fall clips";
@@ -776,6 +1306,7 @@ const setMode = (mode) => {
   currentMode = mode;
   document.body.classList.toggle("mode-exception", mode === "exception");
   document.body.classList.toggle("mode-approval", mode === "approval");
+  document.body.classList.toggle("mode-users", mode === "users");
   if (mode === "exception") {
     clearFocus();
     if (exceptionPlayerEl) {
@@ -788,10 +1319,17 @@ const setMode = (mode) => {
       exceptionPlayerEl.pause();
     }
     void loadSignupRequests();
+  } else if (mode === "users") {
+    clearFocus();
+    if (exceptionPlayerEl) {
+      exceptionPlayerEl.pause();
+    }
+    void loadUsers();
   }
   const liveButton = document.getElementById("modeLive");
   const exceptionButton = document.getElementById("modeException");
   const approvalButton = document.getElementById("modeApproval");
+  const usersButton = document.getElementById("modeUsers");
   if (liveButton) {
     liveButton.classList.toggle("active", mode === "live");
   }
@@ -800,6 +1338,9 @@ const setMode = (mode) => {
   }
   if (approvalButton) {
     approvalButton.classList.toggle("active", mode === "approval");
+  }
+  if (usersButton) {
+    usersButton.classList.toggle("active", mode === "users");
   }
 };
 
@@ -816,6 +1357,7 @@ const initHeader = async () => {
     const liveButton = document.getElementById("modeLive");
     const exceptionButton = document.getElementById("modeException");
     const approvalButton = document.getElementById("modeApproval");
+    const usersButton = document.getElementById("modeUsers");
     if (liveButton) {
       liveButton.addEventListener("click", () => setMode("live"));
     }
@@ -825,12 +1367,75 @@ const initHeader = async () => {
     if (approvalButton) {
       approvalButton.addEventListener("click", () => setMode("approval"));
     }
+    if (usersButton) {
+      usersButton.addEventListener("click", () => setMode("users"));
+    }
     setMode("live");
     updateAuthUi();
   } catch (error) {
     // ignore
   }
 };
+
+if (usersListEl) {
+  usersListEl.addEventListener("change", async (event) => {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement)) {
+      return;
+    }
+    if (!target.classList.contains("userRoleSelect")) {
+      return;
+    }
+    const id = target.dataset.id;
+    const role = target.value;
+    if (!id || (role !== "admin" && role !== "manager" && role !== "user")) {
+      return;
+    }
+    pendingRoleChanges.set(String(id), role);
+    target.classList.add("pending");
+    updateUsersSaveUi();
+  });
+}
+
+if (usersSaveButtonEl) {
+  usersSaveButtonEl.addEventListener("click", async () => {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    if (pendingRoleChanges.size === 0) {
+      return;
+    }
+    usersSaveButtonEl.disabled = true;
+    setUsersSaveStatus("Saving...");
+
+    const entries = Array.from(pendingRoleChanges.entries());
+    for (const [id, role] of entries) {
+      try {
+        const response = await apiFetch("/api/admin/users/role", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, role })
+        });
+        if (!response.ok) {
+          setUsersSaveStatus("Failed to save");
+          updateUsersSaveUi();
+          return;
+        }
+      } catch (error) {
+        setUsersSaveStatus("Failed to save");
+        updateUsersSaveUi();
+        return;
+      }
+    }
+
+    pendingRoleChanges.clear();
+    setUsersSaveStatus("Saved");
+    void loadUsers();
+  });
+}
 
 const initFooter = async () => {
   if (!footerHostEl) {
@@ -842,27 +1447,43 @@ const initFooter = async () => {
       return;
     }
     footerHostEl.innerHTML = await response.text();
-    footerUserEl = document.getElementById("footerUser");
+    footerUserWrapEl = document.getElementById("footerUserWrap");
+    footerUserButtonEl = document.getElementById("footerUserButton");
+    footerDropdownEl = document.getElementById("footerDropdown");
+    footerAccountButtonEl = document.getElementById("footerAccountButton");
+    footerLogoutButtonEl = document.getElementById("footerLogoutButton");
     loginButtonEl = document.getElementById("loginButton");
-    logoutButtonEl = document.getElementById("logoutButton");
+
+    if (footerUserButtonEl) {
+      footerUserButtonEl.addEventListener("click", (event) => {
+        event.stopPropagation();
+        toggleFooterDropdown();
+      });
+    }
+
+    if (footerAccountButtonEl) {
+      footerAccountButtonEl.addEventListener("click", () => {
+        closeFooterDropdown();
+        location.href = "account.html";
+      });
+    }
+
+    if (footerLogoutButtonEl) {
+      footerLogoutButtonEl.addEventListener("click", async () => {
+        closeFooterDropdown();
+        try {
+          await apiFetch("/api/logout", { method: "POST" });
+        } catch (error) {
+          // ignore
+        }
+        sessionStorage.removeItem("session_id");
+        location.reload();
+      });
+    }
 
     if (loginButtonEl) {
       loginButtonEl.addEventListener("click", () => {
         location.href = "login.html";
-      });
-    }
-
-    if (logoutButtonEl) {
-      logoutButtonEl.addEventListener("click", async () => {
-        try {
-          await fetch(`${apiBase}/api/logout`, {
-            method: "POST",
-            credentials: "include"
-          });
-        } catch (error) {
-          // ignore
-        }
-        location.reload();
       });
     }
 
@@ -929,17 +1550,31 @@ if (exceptionCommentListEl) {
     }
     const id = button.dataset.id;
     const owner = button.dataset.user || "";
+    const ownerRole = button.dataset.role || "";
+    const ownerUsername = button.dataset.username || "";
     if (!id) {
       return;
     }
-    if (currentUser.role !== "admin" && owner !== currentUser.username) {
+    const displayName = currentUser.nickname || currentUser.username;
+    const elevated = currentUser.role === "admin" || currentUser.role === "manager";
+    const isOwner = (ownerUsername && ownerUsername === currentUser.username)
+      || owner === currentUser.username
+      || owner === displayName;
+    if (currentUser.role === "manager" && !isOwner) {
+      if (!ownerRole) {
+        return;
+      }
+      if (ownerRole === "admin") {
+        return;
+      }
+    }
+    if (!elevated && !isOwner) {
       return;
     }
     try {
-      const response = await fetch(`${apiBase}/api/clip-comments?clipId=${encodeURIComponent(currentClipId)}`,
+      const response = await apiFetch(`/api/clip-comments?clipId=${encodeURIComponent(currentClipId)}`,
         {
           method: "DELETE",
-          credentials: "include",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id })
         }
@@ -1012,10 +1647,28 @@ if (commandHistoryEl) {
     }
     const id = button.dataset.id;
     const owner = button.dataset.user || "";
+    const ownerRole = button.dataset.role || "";
+    const ownerUsername = button.dataset.username || "";
     if (!id) {
       return;
     }
-    if (currentUser.role !== "admin" && owner !== currentUser.username) {
+    const displayName = currentUser.nickname || currentUser.username;
+    const elevated = currentUser.role === "admin" || currentUser.role === "manager";
+    const isOwner = (ownerUsername && ownerUsername === currentUser.username)
+      || owner === currentUser.username
+      || owner === displayName;
+    if (currentUser.role === "manager" && !isOwner) {
+      if (!ownerRole) {
+        return;
+      }
+      if (ownerRole === "admin") {
+        return;
+      }
+    }
+    if (!elevated && !isOwner) {
+      return;
+    }
+    if (!ws) {
       return;
     }
     ws.send(JSON.stringify({
@@ -1026,7 +1679,7 @@ if (commandHistoryEl) {
   });
 }
 
-ws.onmessage = async (event) => {
+const handleWsMessage = async (event) => {
   const message = JSON.parse(event.data);
   if (message.type === "viewer-id") {
     return;
@@ -1154,14 +1807,15 @@ for (const [senderId, slot] of slots.entries()) {
   });
 }
 
-ws.onclose = () => {
+const handleWsClose = () => {
   showOfflineAll();
 };
 
-ws.onerror = () => {
+const handleWsError = () => {
   showOfflineAll();
 };
 
+initWebSocket();
 initHeader();
 initFooter();
 updateAuthUi();
