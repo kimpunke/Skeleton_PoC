@@ -37,7 +37,13 @@
       </div>
     </div>
     <div id="exceptionView">
-      <div id="exceptionList" class="exceptionList"></div>
+      <div class="exceptionListPane">
+        <div class="exceptionHeader">
+          <div class="exceptionTitle">Exception</div>
+          <button id="exceptionRefresh" class="exceptionRefresh" type="button">Refresh</button>
+        </div>
+        <div id="exceptionList" class="exceptionList"></div>
+      </div>
       <div class="exceptionPlayer">
         <video id="exceptionPlayer" controls playsinline></video>
         <div class="exceptionComments">
@@ -82,6 +88,10 @@
         />
         <button id="commandSend" type="submit">Send</button>
       </form>
+      <div id="recordControls" class="recordControls">
+        <div class="recordTitle">Record</div>
+        <button id="recordToggle" type="button">Record</button>
+      </div>
       <div class="commandHistoryTitle">History</div>
       <div id="commandHistory" class="commandHistory" aria-live="polite"></div>
     </div>

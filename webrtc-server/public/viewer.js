@@ -66,6 +66,7 @@ const fallAlertCloseEl = document.getElementById("fallAlertClose");
 const exceptionViewEl = document.getElementById("exceptionView");
 const exceptionListEl = document.getElementById("exceptionList");
 const exceptionPlayerEl = document.getElementById("exceptionPlayer");
+const exceptionRefreshEl = document.getElementById("exceptionRefresh");
 const approvalViewEl = document.getElementById("approvalView");
 const approvalListEl = document.getElementById("approvalList");
 const approvalRefreshEl = document.getElementById("approvalRefresh");
@@ -75,6 +76,8 @@ const usersSaveButtonEl = document.getElementById("usersSave");
 const usersSaveStatusEl = document.getElementById("usersSaveStatus");
 const commandUserEl = document.getElementById("commandUser");
 const commandPanelEl = document.getElementById("commandPanel");
+const recordControlsEl = document.getElementById("recordControls");
+const recordToggleEl = document.getElementById("recordToggle");
 const footerHostEl = document.getElementById("footerHost");
 let footerUserWrapEl = null;
 let footerUserButtonEl = null;
@@ -195,6 +198,77 @@ const recordCommand = (senderId, entry) => {
   renderCommandHistory(senderId);
 };
 
+const getFocusedSlot = () => (focusedSenderId ? slots.get(focusedSenderId) : null);
+
+const updateRecordUi = () => {
+  if (!recordControlsEl || !recordToggleEl) {
+    return;
+  }
+  const isAdmin = currentUser && currentUser.role === "admin";
+  const canRecord = Boolean(isAdmin && focusedSenderId && currentMode === "live");
+  recordControlsEl.style.display = canRecord ? "flex" : "none";
+  const slot = getFocusedSlot();
+  const recording = Boolean(slot && slot.manualRecording);
+  recordToggleEl.textContent = recording ? "Stop" : "Record";
+  recordToggleEl.classList.toggle("recording", recording);
+  recordToggleEl.disabled = !canRecord || !slot || !slot.stream;
+};
+
+const finalizeManualClipData = async (chunks, senderId, startedAt) => {
+  if (!chunks || chunks.length === 0 || !senderId) {
+    return;
+  }
+  const blob = new Blob(chunks, { type: "video/webm" });
+  const timestamp = new Date(startedAt || Date.now()).toISOString();
+  void uploadClip(blob, senderId, timestamp, "record");
+};
+
+const startManualRecording = (slot) => {
+  if (!slot || slot.manualRecording || !slot.stream || !window.MediaRecorder) {
+    return;
+  }
+  const mimeTypes = [
+    "video/webm;codecs=vp8",
+    "video/webm;codecs=vp9",
+    "video/webm"
+  ];
+  const mimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
+  const recorder = mimeType ? new MediaRecorder(slot.stream, { mimeType }) : new MediaRecorder(slot.stream);
+  slot.manualRecorder = recorder;
+  slot.manualChunks = [];
+  slot.manualRecording = true;
+  slot.manualStartedAt = Date.now();
+  slot.manualSenderId = focusedSenderId;
+  recorder.ondataavailable = (event) => {
+    if (event.data && event.data.size > 0) {
+      slot.manualChunks.push(event.data);
+    }
+  };
+  recorder.onstop = () => {
+    const chunks = slot.manualChunks;
+    const senderId = slot.manualSenderId;
+    const startedAt = slot.manualStartedAt;
+    slot.manualRecorder = null;
+    slot.manualChunks = [];
+    slot.manualRecording = false;
+    slot.manualStartedAt = null;
+    slot.manualSenderId = null;
+    updateRecordUi();
+    void finalizeManualClipData(chunks, senderId, startedAt);
+  };
+  recorder.start(FALL_CHUNK_MS);
+  updateRecordUi();
+};
+
+const stopManualRecording = (slot) => {
+  if (!slot || !slot.manualRecorder) {
+    return;
+  }
+  if (slot.manualRecorder.state !== "inactive") {
+    slot.manualRecorder.stop();
+  }
+};
+
 const setCommandHistory = (senderId, entries) => {
   if (!senderId) {
     return;
@@ -255,6 +329,7 @@ const updateAuthUi = () => {
   }
   renderCommandHistory(loggedIn ? focusedSenderId : null);
   renderClipComments(currentClipId, loggedIn ? clipCommentsById.get(currentClipId) : null);
+  updateRecordUi();
 };
 
 const closeFooterDropdown = () => {
@@ -679,7 +754,11 @@ const clearStream = (senderId) => {
   if (slot && slot.video) {
     slot.video.srcObject = null;
   }
+  if (slot && slot.manualRecording) {
+    stopManualRecording(slot);
+  }
   stopRecorder(slot);
+  updateRecordUi();
 };
 
 const showOfflineAll = () => {
@@ -760,7 +839,12 @@ for (let i = 1; i <= MAX_SENDERS; i += 1) {
     rollTimer: null,
     pendingUpload: false,
     pendingSenderId: null,
-    restartAfterStop: false
+    restartAfterStop: false,
+    manualRecorder: null,
+    manualChunks: [],
+    manualRecording: false,
+    manualStartedAt: null,
+    manualSenderId: null
   });
   showOffline(senderId);
 }
@@ -848,6 +932,7 @@ const startRecorder = (slot, stream) => {
 
   recorder.start(FALL_CHUNK_MS);
   scheduleRecorderRoll(slot);
+  updateRecordUi();
 };
 
 const stopRecorder = (slot) => {
@@ -1149,17 +1234,18 @@ const finalizeFallClipData = async (chunks, senderId, fallStartedAt, headerChunk
   }
   const blob = new Blob(data, { type: "video/webm" });
   const timestamp = new Date(fallStartedAt || Date.now()).toISOString();
-  void uploadFallClip(blob, senderId, timestamp);
+  void uploadClip(blob, senderId, timestamp, "fall");
 };
 
-const uploadFallClip = async (blob, senderId, timestamp) => {
+const uploadClip = async (blob, senderId, timestamp, type = "fall") => {
   try {
     const response = await apiFetch("/api/fall-clips", {
       method: "POST",
       headers: {
         "Content-Type": "application/octet-stream",
         "X-Fall-Sender": senderId,
-        "X-Fall-Timestamp": timestamp
+        "X-Fall-Timestamp": timestamp,
+        "X-Clip-Type": type
       },
       body: blob
     });
@@ -1171,16 +1257,21 @@ const uploadFallClip = async (blob, senderId, timestamp) => {
   }
 };
 
-const formatClipLabel = (timestamp) => {
+const formatClipLabel = (clip) => {
+  const timestamp = clip && typeof clip === "object" ? (clip.timestamp || clip.createdAt) : clip;
   const date = new Date(timestamp);
+  const type = clip && typeof clip === "object"
+    ? (clip.type || (typeof clip.id === "string" && clip.id.startsWith("record-") ? "record" : "fall"))
+    : "fall";
+  const label = type === "record" ? "record" : "fallen";
   if (Number.isNaN(date.getTime())) {
-    return "fallen";
+    return label;
   }
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   const hour = String(date.getHours()).padStart(2, "0");
   const minute = String(date.getMinutes()).padStart(2, "0");
-  return `${month}월 ${day}일 ${hour}시 ${minute}분 fallen`;
+  return `${month}월 ${day}일 ${hour}시 ${minute}분 ${label}`;
 };
 
 const loadFallClips = async () => {
@@ -1210,7 +1301,7 @@ const loadFallClips = async () => {
       const item = document.createElement("button");
       item.type = "button";
       item.className = "exceptionItem";
-      item.textContent = formatClipLabel(clip.timestamp || clip.createdAt);
+      item.textContent = formatClipLabel(clip);
       item.addEventListener("click", () => {
         if (exceptionPlayerEl) {
           exceptionPlayerEl.src = clip.url;
@@ -1275,6 +1366,10 @@ const clearFocus = () => {
   if (!gridEl) {
     return;
   }
+  const currentSlot = getFocusedSlot();
+  if (currentSlot && currentSlot.manualRecording) {
+    stopManualRecording(currentSlot);
+  }
   document.body.classList.remove("focused");
   focusedSenderId = null;
   gridEl.classList.remove("focused");
@@ -1290,11 +1385,16 @@ const clearFocus = () => {
     commandInputEl.value = "";
   }
   renderCommandHistory(null);
+  updateRecordUi();
 };
 
 const focusSender = (senderId) => {
   if (!gridEl) {
     return;
+  }
+  const previousSlot = getFocusedSlot();
+  if (previousSlot && previousSlot.manualRecording) {
+    stopManualRecording(previousSlot);
   }
   const slot = slots.get(senderId);
   if (!slot || !slot.frame) {
@@ -1317,6 +1417,7 @@ const focusSender = (senderId) => {
   if (currentUser) {
     renderCommandHistory(senderId);
   }
+  updateRecordUi();
 };
 
 const setMode = (mode) => {
@@ -1359,6 +1460,7 @@ const setMode = (mode) => {
   if (usersButton) {
     usersButton.classList.toggle("active", mode === "users");
   }
+  updateRecordUi();
 };
 
 const initHeader = async () => {
@@ -1538,10 +1640,36 @@ if (backButton) {
   });
 }
 
+if (exceptionRefreshEl) {
+  exceptionRefreshEl.addEventListener("click", () => {
+    void loadFallClips();
+  });
+}
+
 if (commandFormEl) {
   commandFormEl.addEventListener("submit", (event) => {
     event.preventDefault();
     sendCommand();
+  });
+}
+
+if (recordToggleEl) {
+  recordToggleEl.addEventListener("click", () => {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    if (currentMode !== "live") {
+      return;
+    }
+    const slot = getFocusedSlot();
+    if (!slot) {
+      return;
+    }
+    if (slot.manualRecording) {
+      stopManualRecording(slot);
+    } else {
+      startManualRecording(slot);
+    }
   });
 }
 

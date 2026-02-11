@@ -515,6 +515,35 @@ body.mode-exception #commandPanel {
   gap: 6px;
 }
 
+.recordControls {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.recordTitle {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  opacity: 0.7;
+}
+
+#recordToggle {
+  border: none;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #000;
+  font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#recordToggle.recording {
+  background: rgba(255, 90, 90, 0.95);
+}
+
 #authSubmit,
 #signupSubmit,
 #accountSave,
@@ -976,7 +1005,7 @@ body.mode-users #commandPanel {
 }
 
 .exceptionList {
-  width: 260px;
+  width: 100%;
   max-height: calc(100vh - 120px);
   overflow-y: auto;
   padding: 8px;
@@ -991,6 +1020,44 @@ body.mode-users #commandPanel {
   font-size: 12px;
 }
 
+.exceptionListPane {
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.exceptionHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.exceptionTitle {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  opacity: 0.8;
+  color: #fff;
+  font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+.exceptionRefresh {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.10);
+  color: rgba(255, 255, 255, 0.95);
+  font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.exceptionRefresh:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
 .exceptionItem {
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.05);
@@ -1002,6 +1069,10 @@ body.mode-users #commandPanel {
   font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .exceptionItemRow {
@@ -1019,6 +1090,7 @@ body.mode-users #commandPanel {
   font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   cursor: pointer;
+  flex: 0 0 auto;
 }
 
 .exceptionClipDelete:hover {
@@ -1139,8 +1211,11 @@ body.mode-users #commandPanel {
     flex-direction: column;
   }
 
-  .exceptionList {
+  .exceptionListPane {
     width: 100%;
+  }
+
+  .exceptionList {
     max-height: 220px;
   }
 }

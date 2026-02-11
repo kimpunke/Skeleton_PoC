@@ -365,9 +365,10 @@ const parseClipStamp = (stamp) => {
 };
 
 const buildClipInfo = (filename, stats) => {
-  const match = filename.match(/^fall-(\w+)-(\d{8}-\d{6}-\d{3})\.webm$/);
-  const senderId = match ? match[1] : "unknown";
-  const parsedDate = match ? parseClipStamp(match[2]) : null;
+  const match = filename.match(/^(fall|record)-(\w+)-(\d{8}-\d{6}-\d{3})\.webm$/);
+  const type = match ? match[1] : "fall";
+  const senderId = match ? match[2] : "unknown";
+  const parsedDate = match ? parseClipStamp(match[3]) : null;
   const timestamp = (parsedDate || stats.mtime).toISOString();
   return {
     id: filename,
@@ -375,7 +376,8 @@ const buildClipInfo = (filename, stats) => {
     url: `/clips/${filename}`,
     senderId,
     timestamp,
-    createdAt: stats.mtime.toISOString()
+    createdAt: stats.mtime.toISOString(),
+    type
   };
 };
 
@@ -1069,7 +1071,7 @@ const server = http.createServer((req, res) => {
           return;
         }
         const clips = files
-          .filter((file) => file.endsWith(".webm"))
+          .filter((file) => /^(fall|record)-[0-9a-z]+-\d{8}-\d{6}-\d{3}\.webm$/i.test(file))
           .map((file) => buildClipInfo(file, fs.statSync(path.join(clipsDir, file))))
           .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
         res.writeHead(200, { "Content-Type": "application/json" });
@@ -1098,7 +1100,7 @@ const server = http.createServer((req, res) => {
         return;
       }
       const filename = path.basename(clipId);
-      if (!/^fall-[0-9a-z]+-\d{8}-\d{6}-\d{3}\.webm$/i.test(filename)) {
+      if (!/^(fall|record)-[0-9a-z]+-\d{8}-\d{6}-\d{3}\.webm$/i.test(filename)) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "invalid-id" }));
         return;
@@ -1133,6 +1135,8 @@ const server = http.createServer((req, res) => {
     if (req.method === "POST") {
       const senderHeader = req.headers["x-fall-sender"] || "unknown";
       const senderId = String(senderHeader).replace(/[^0-9a-z]/gi, "") || "unknown";
+      const clipTypeHeader = String(req.headers["x-clip-type"] || "").trim().toLowerCase();
+      const clipType = clipTypeHeader === "record" ? "record" : "fall";
       const timestampHeader = req.headers["x-fall-timestamp"];
       const timestamp = timestampHeader ? new Date(String(timestampHeader)) : new Date();
       const clipDate = Number.isNaN(timestamp.getTime()) ? new Date() : timestamp;
@@ -1166,9 +1170,9 @@ const server = http.createServer((req, res) => {
         }
         const nowMs = Date.now();
         const lastClip = lastClipBySender.get(senderId);
-        if (lastClip && nowMs - lastClip.savedAtMs < MIN_CLIP_GAP_MS) {
+        if (lastClip && lastClip.type === clipType && nowMs - lastClip.savedAtMs < MIN_CLIP_GAP_MS) {
           const existingStamp = lastClip.stamp;
-          const existingFilename = `fall-${senderId}-${existingStamp}.webm`;
+          const existingFilename = `${clipType}-${senderId}-${existingStamp}.webm`;
           const existingPath = path.join(clipsDir, existingFilename);
           if (fs.existsSync(existingPath)) {
             const stats = fs.statSync(existingPath);
@@ -1183,10 +1187,10 @@ const server = http.createServer((req, res) => {
         }
 
         const clipStamp = requestedStamp;
-        const filename = `fall-${senderId}-${clipStamp}.webm`;
+        const filename = `${clipType}-${senderId}-${clipStamp}.webm`;
         const filePath = path.join(clipsDir, filename);
         // Reserve stamp immediately to avoid duplicate writes.
-        lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs });
+        lastClipBySender.set(senderId, { stamp: clipStamp, savedAtMs: nowMs, type: clipType });
 
         if (fs.existsSync(filePath)) {
           const stats = fs.statSync(filePath);
@@ -1203,7 +1207,7 @@ const server = http.createServer((req, res) => {
           })
           .catch(() => {
             const current = lastClipBySender.get(senderId);
-            if (current && current.stamp === clipStamp) {
+            if (current && current.stamp === clipStamp && current.type === clipType) {
               lastClipBySender.delete(senderId);
             }
             try {
