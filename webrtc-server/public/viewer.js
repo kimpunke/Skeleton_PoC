@@ -750,6 +750,7 @@ for (let i = 1; i <= MAX_SENDERS; i += 1) {
     recorder: null,
     recordedChunks: [],
     bufferChunks: [],
+    headerChunk: null,
     fallActive: false,
     fallStartedAt: null,
     fallStopTimer: null,
@@ -773,8 +774,8 @@ const startRecorder = (slot, stream) => {
   }
   stopRecorder(slot);
   const mimeTypes = [
-    "video/webm;codecs=vp9",
     "video/webm;codecs=vp8",
+    "video/webm;codecs=vp9",
     "video/webm"
   ];
   const mimeType = mimeTypes.find((type) => MediaRecorder.isTypeSupported(type));
@@ -784,6 +785,7 @@ const startRecorder = (slot, stream) => {
   slot.stream = stream;
   slot.recordedChunks = [];
   slot.bufferChunks = [];
+  slot.headerChunk = null;
   slot.fallActive = false;
   slot.fallStartedAt = null;
   if (slot.fallStopTimer) {
@@ -799,17 +801,18 @@ const startRecorder = (slot, stream) => {
       return;
     }
     const now = Date.now();
-    if (slot.fallActive || slot.pendingUpload) {
-      slot.recordedChunks.push({
-        data: event.data,
-        timestamp: now
-      });
-      return;
-    }
-    slot.bufferChunks.push({
+    const entry = {
       data: event.data,
       timestamp: now
-    });
+    };
+    if (!slot.headerChunk) {
+      slot.headerChunk = entry;
+    }
+    if (slot.fallActive || slot.pendingUpload) {
+      slot.recordedChunks.push(entry);
+      return;
+    }
+    slot.bufferChunks.push(entry);
     const cutoff = now - FALL_PREBUFFER_MS;
     while (slot.bufferChunks.length > 0 && slot.bufferChunks[0].timestamp < cutoff) {
       slot.bufferChunks.shift();
@@ -820,6 +823,7 @@ const startRecorder = (slot, stream) => {
     const chunks = slot.recordedChunks;
     const senderId = slot.pendingSenderId;
     const fallStartedAt = slot.fallStartedAt;
+    const headerChunk = slot.headerChunk;
     const shouldUpload = slot.pendingUpload;
     const shouldRestart = slot.restartAfterStop;
     const nextStream = slot.stream;
@@ -828,13 +832,14 @@ const startRecorder = (slot, stream) => {
     slot.pendingSenderId = null;
     slot.restartAfterStop = false;
     slot.fallStartedAt = null;
+    slot.headerChunk = null;
     if (slot.fallStopTimer) {
       clearTimeout(slot.fallStopTimer);
       slot.fallStopTimer = null;
     }
     slot.recorder = null;
     if (shouldUpload) {
-      void finalizeFallClipData(chunks, senderId, fallStartedAt);
+      void finalizeFallClipData(chunks, senderId, fallStartedAt, headerChunk);
     }
     if (shouldRestart && nextStream) {
       startRecorder(slot, nextStream);
@@ -842,6 +847,7 @@ const startRecorder = (slot, stream) => {
   };
 
   recorder.start(FALL_CHUNK_MS);
+  scheduleRecorderRoll(slot);
 };
 
 const stopRecorder = (slot) => {
@@ -858,6 +864,7 @@ const stopRecorder = (slot) => {
   slot.recordedChunks = [];
   slot.bufferChunks = [];
   slot.fallActive = false;
+  slot.headerChunk = null;
   if (slot.fallStopTimer) {
     clearTimeout(slot.fallStopTimer);
     slot.fallStopTimer = null;
@@ -942,7 +949,7 @@ const finishFallClip = (slot, senderId) => {
   }, FALL_POSTBUFFER_MS);
 };
 
-const normalizeFallChunks = (chunks, fallStartedAt) => {
+const normalizeFallChunks = (chunks, fallStartedAt, headerChunk) => {
   const data = [];
   let firstTimestamp = null;
   let lastTimestamp = null;
@@ -969,6 +976,17 @@ const normalizeFallChunks = (chunks, fallStartedAt) => {
     durationMs = Math.max(FALL_CHUNK_MS, Date.now() - fallStartedAt);
   } else {
     durationMs = data.length * FALL_CHUNK_MS;
+  }
+  if (headerChunk && headerChunk.data && data.length > 0) {
+    const headerData = headerChunk.data;
+    const headerIndex = data.indexOf(headerData);
+    if (headerIndex === 0) {
+      return { data, durationMs };
+    }
+    if (headerIndex > 0) {
+      data.splice(headerIndex, 1);
+    }
+    data.unshift(headerData);
   }
   return { data, durationMs };
 };
@@ -1121,18 +1139,17 @@ const fixWebmDuration = async (blob, durationMs) => {
   return new Blob([buffer], { type: "video/webm" });
 };
 
-const finalizeFallClipData = async (chunks, senderId, fallStartedAt) => {
+const finalizeFallClipData = async (chunks, senderId, fallStartedAt, headerChunk) => {
   if (!chunks || chunks.length === 0) {
     return;
   }
-  const { data, durationMs } = normalizeFallChunks(chunks, fallStartedAt);
+  const { data } = normalizeFallChunks(chunks, fallStartedAt, headerChunk);
   if (data.length === 0) {
     return;
   }
   const blob = new Blob(data, { type: "video/webm" });
-  const fixedBlob = await fixWebmDuration(blob, durationMs);
   const timestamp = new Date(fallStartedAt || Date.now()).toISOString();
-  void uploadFallClip(fixedBlob, senderId, timestamp);
+  void uploadFallClip(blob, senderId, timestamp);
 };
 
 const uploadFallClip = async (blob, senderId, timestamp) => {

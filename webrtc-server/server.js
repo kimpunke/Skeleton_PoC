@@ -2,6 +2,8 @@ import http from "http";
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+import os from "os";
+import { spawn } from "child_process";
 import { DatabaseSync } from "node:sqlite";
 import { WebSocketServer } from "ws";
 import { fileURLToPath } from "url";
@@ -18,7 +20,9 @@ const commandHistory = new Map();
 const senderHistoryKeyById = new Map();
 // Clip comments are persisted in sqlite (see /api/clip-comments).
 const lastClipBySender = new Map();
-const MIN_CLIP_GAP_MS = 5000;
+const MIN_CLIP_GAP_MS = 1000;
+const MAX_CLIP_BYTES = 30 * 1024 * 1024;
+let ffmpegBinary = null;
 
 if (!fs.existsSync(clipsDir)) {
   fs.mkdirSync(clipsDir, { recursive: true });
@@ -27,6 +31,81 @@ if (!fs.existsSync(clipsDir)) {
 if (!fs.existsSync(path.dirname(dbPath))) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 }
+
+const resolveFfmpegBinary = async () => {
+  if (ffmpegBinary) {
+    return ffmpegBinary;
+  }
+  const envPath = (process.env.FFMPEG_PATH || "").trim();
+  if (envPath) {
+    ffmpegBinary = envPath;
+    return ffmpegBinary;
+  }
+  try {
+    const mod = await import("ffmpeg-static");
+    const resolved = typeof mod.default === "string" ? mod.default : mod;
+    if (resolved) {
+      ffmpegBinary = resolved;
+      return ffmpegBinary;
+    }
+  } catch (error) {
+    // ignore
+  }
+  ffmpegBinary = "ffmpeg";
+  return ffmpegBinary;
+};
+
+const remuxWebm = async (buffer, outputPath) => {
+  const binary = await resolveFfmpegBinary();
+  if (!binary) {
+    throw new Error("ffmpeg-unavailable");
+  }
+  const tempInput = path.join(os.tmpdir(), `fall-upload-${crypto.randomUUID()}.webm`);
+  await fs.promises.writeFile(tempInput, buffer);
+  try {
+    await new Promise((resolve, reject) => {
+      const proc = spawn(binary, [
+        "-y",
+        "-fflags",
+        "+genpts+discardcorrupt",
+        "-i",
+        tempInput,
+        "-c:v",
+        "libvpx",
+        "-b:v",
+        "1M",
+        "-g",
+        "30",
+        "-keyint_min",
+        "30",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        "-reset_timestamps",
+        "1",
+        "-avoid_negative_ts",
+        "make_zero",
+        "-f",
+        "webm",
+        outputPath
+      ]);
+      proc.on("error", () => reject(new Error("ffmpeg-unavailable")));
+      proc.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`ffmpeg-exit-${code}`));
+        }
+      });
+    });
+  } finally {
+    try {
+      await fs.promises.unlink(tempInput);
+    } catch (error) {
+      // ignore
+    }
+  }
+};
 
 const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA foreign_keys = ON;");
@@ -1059,8 +1138,26 @@ const server = http.createServer((req, res) => {
       const clipDate = Number.isNaN(timestamp.getTime()) ? new Date() : timestamp;
       const requestedStamp = formatClipStamp(clipDate);
       const chunks = [];
-      req.on("data", (chunk) => chunks.push(chunk));
+      let receivedBytes = 0;
+      let payloadTooLarge = false;
+      req.on("data", (chunk) => {
+        if (payloadTooLarge) {
+          return;
+        }
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_CLIP_BYTES) {
+          payloadTooLarge = true;
+          res.writeHead(413, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "payload-too-large" }));
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      });
       req.on("end", () => {
+        if (payloadTooLarge) {
+          return;
+        }
         const buffer = Buffer.concat(chunks);
         if (buffer.length === 0) {
           res.writeHead(400, { "Content-Type": "application/json" });
@@ -1098,21 +1195,27 @@ const server = http.createServer((req, res) => {
           return;
         }
 
-        fs.writeFile(filePath, buffer, (writeErr) => {
-          if (writeErr) {
-            // Allow retry if write failed.
+        remuxWebm(buffer, filePath)
+          .then(() => {
+            const stats = fs.statSync(filePath);
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify(buildClipInfo(filename, stats)));
+          })
+          .catch(() => {
             const current = lastClipBySender.get(senderId);
             if (current && current.stamp === clipStamp) {
               lastClipBySender.delete(senderId);
             }
+            try {
+              if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+              }
+            } catch (error) {
+              // ignore
+            }
             res.writeHead(500, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "write-failed" }));
-            return;
-          }
-          const stats = fs.statSync(filePath);
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify(buildClipInfo(filename, stats)));
-        });
+            res.end(JSON.stringify({ error: "mux-failed" }));
+          });
       });
       return;
     }
