@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>WebRTC Viewer</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="/css/styles.css" />
   </head>
   <body>
     <div id="headerHost"></div>
@@ -16,22 +16,22 @@
     </div>
     <div id="grid">
       <div class="videoFrame" data-sender="1">
-        <img id="offlineImage1" class="offlineImage" src="offline.png" alt="Offline" />
+        <img id="offlineImage1" class="offlineImage" src="/assets/offline.png" alt="Offline" />
         <video id="remoteVideo1" autoplay playsinline muted></video>
         <div id="poseLabel1" class="poseLabel"></div>
       </div>
       <div class="videoFrame" data-sender="2">
-        <img id="offlineImage2" class="offlineImage" src="offline.png" alt="Offline" />
+        <img id="offlineImage2" class="offlineImage" src="/assets/offline.png" alt="Offline" />
         <video id="remoteVideo2" autoplay playsinline muted></video>
         <div id="poseLabel2" class="poseLabel"></div>
       </div>
       <div class="videoFrame" data-sender="3">
-        <img id="offlineImage3" class="offlineImage" src="offline.png" alt="Offline" />
+        <img id="offlineImage3" class="offlineImage" src="/assets/offline.png" alt="Offline" />
         <video id="remoteVideo3" autoplay playsinline muted></video>
         <div id="poseLabel3" class="poseLabel"></div>
       </div>
       <div class="videoFrame" data-sender="4">
-        <img id="offlineImage4" class="offlineImage" src="offline.png" alt="Offline" />
+        <img id="offlineImage4" class="offlineImage" src="/assets/offline.png" alt="Offline" />
         <video id="remoteVideo4" autoplay playsinline muted></video>
         <div id="poseLabel4" class="poseLabel"></div>
       </div>
@@ -96,6 +96,6 @@
       <div id="commandHistory" class="commandHistory" aria-live="polite"></div>
     </div>
     <div id="footerHost"></div>
-    <script src="viewer.js"></script>
+    <script type="module" src="/js/viewer.js"></script>
   </body>
 </html>

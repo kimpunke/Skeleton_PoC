@@ -189,7 +189,7 @@ if (deleteAccountButtonEl) {
         updateDeleteUi();
         return;
       }
-      location.href = "login.html";
+      location.href = "/html/login.html";
     } catch (error) {
       setError("Failed to delete account");
       updateDeleteUi();
@@ -203,7 +203,7 @@ const loadAccount = async () => {
   try {
     const sessionRes = await apiFetch("/api/session");
     if (!sessionRes.ok) {
-      location.href = "login.html";
+      location.href = "/html/login.html";
       return;
     }
     const session = await sessionRes.json();
